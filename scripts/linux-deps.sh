@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Bibliothèques nécessaires à Tauri 2 et à cpal (ALSA) sous Ubuntu.
+# Libraries needed by Tauri 2, PulseAudio and the FFmpeg build on Ubuntu.
 set -eu
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
@@ -9,4 +9,5 @@ sudo apt-get install -y --no-install-recommends \
   librsvg2-dev \
   libxdo-dev \
   libssl-dev \
-  libasound2-dev
+  libpulse-dev \
+  xz-utils

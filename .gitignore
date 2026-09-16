@@ -6,3 +6,4 @@ dist/
 .impeccable/review/
 .impeccable/direction-payload.json
 .impeccable/questions/
+third_party/

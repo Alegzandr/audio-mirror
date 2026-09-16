@@ -1,0 +1,45 @@
+name: FFmpeg
+description: Provides static libavutil and libswresample for the given Rust targets
+inputs:
+  targets:
+    description: Space separated Rust target triples
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Cache (vcpkg)
+      if: runner.os == 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.LOCALAPPDATA }}\vcpkg\archives
+        key: vcpkg-ffmpeg-${{ runner.os }}-${{ hashFiles('.github/actions/ffmpeg/action.yml') }}
+    - name: Build (vcpkg)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "ffmpeg[core,swresample]:x64-windows-static-md" --disable-metrics
+        "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+    - name: Cache (source build)
+      if: runner.os != 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: third_party/ffmpeg
+        key: ffmpeg-${{ runner.os }}-${{ inputs.targets }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+    - name: Build (source)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        for target in ${{ inputs.targets }}; do
+          case "$target" in
+            x86_64-apple-darwin)
+              scripts/build-ffmpeg.sh "$target" --enable-cross-compile --arch=x86_64 --target-os=darwin \
+                --cc="clang -arch x86_64" --extra-cflags="-mmacosx-version-min=13.0" \
+                --extra-ldflags="-arch x86_64 -mmacosx-version-min=13.0" ;;
+            aarch64-apple-darwin)
+              scripts/build-ffmpeg.sh "$target" --extra-cflags="-mmacosx-version-min=13.0" \
+                --extra-ldflags="-mmacosx-version-min=13.0" ;;
+            *)
+              scripts/build-ffmpeg.sh "$target" ;;
+          esac
+        done

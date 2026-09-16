@@ -14,24 +14,39 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
-tauri = { version = "2.11", features = ["image-png", "tray-icon"] }
+tauri = { version = "2.11", features = ["tray-icon", "image-png"] }
 tauri-plugin-updater = "2.11"
-tauri-plugin-process = "2.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-cpal = "0.18"
-rubato = "5"
-rtrb = "0.4"
-parking_lot = "0.12"
-log = "0.4"
 tauri-plugin-autostart = "2.5"
 tauri-plugin-single-instance = "2.4"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-cpal = { version = "0.18", features = ["pulseaudio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 self-replace = "1.5"
+windows = { version = "0.62", features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+windows-core = "0.62"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-sys = "1.23"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSError", "NSObject", "NSString"] }
+objc2-screen-capture-kit = { version = "0.3", features = ["block2", "objc2-core-media"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMSampleBuffer"] }
+block2 = "0.6"
 
 [profile.release]
 codegen-units = 1

@@ -13,7 +13,6 @@ const STATUS_POLL_MS = 100;
 const STATE_LABELS = {
   idle: "Waiting for source",
   starting: "Starting",
-  buffering: "Buffering",
   playing: "Playing",
   error: "Unavailable",
   blocked: "Skipped",
@@ -126,13 +125,10 @@ function enabledCount() {
   return snapshot.config.outputs.filter((o) => o.enabled).length;
 }
 
-/** Output captured by the current source: playing into it would feed back. */
+/** Output recorded by the current source: playing into it would feed back. */
 function capturedOutput() {
-  const src = snapshot.config.source;
-  if (src === "desktop") return snapshot.devices.desktop_output;
-  if (src.startsWith("loopback:")) return src.slice("loopback:".length);
-  if (src.startsWith("pulseaudio:") && src.endsWith(".monitor")) return src.slice(0, -".monitor".length);
-  return null;
+  const src = snapshot.devices.sources.find((s) => s.id === snapshot.config.source);
+  return src ? src.captures_output : null;
 }
 
 function renderOutputs() {
@@ -467,12 +463,11 @@ function demoInvoke(cmd, args) {
         update_ready: new URLSearchParams(location.search).get("update"),
         config: structuredClone(demo.config),
         devices: {
-          desktop_output: "wasapi:speakers",
           sources: [
-            { id: "desktop", name: "Desktop audio", kind: "desktop", is_default: false },
-            { id: "loopback:wasapi:speakers", name: "Speakers (Realtek Audio)", kind: "loopback", is_default: true },
-            { id: "loopback:wasapi:headset", name: "Headphones (USB Audio)", kind: "loopback", is_default: false },
-            { id: "wasapi:mic", name: "Microphone (Shure MV7)", kind: "capture", is_default: true },
+            { id: "desktop", name: "Desktop audio", kind: "desktop", is_default: false, captures_output: "wasapi:speakers" },
+            { id: "output:wasapi:speakers", name: "Speakers (Realtek Audio)", kind: "loopback", is_default: true, captures_output: "wasapi:speakers" },
+            { id: "output:wasapi:headset", name: "Headphones (USB Audio)", kind: "loopback", is_default: false, captures_output: "wasapi:headset" },
+            { id: "input:wasapi:mic", name: "Microphone (Shure MV7)", kind: "capture", is_default: true, captures_output: null },
           ],
           outputs: [
             { id: "wasapi:speakers", name: "Speakers (Realtek Audio)", is_default: true },
@@ -485,11 +480,11 @@ function demoInvoke(cmd, args) {
     case "status":
       return Promise.resolve({
         running: enabled.length > 0,
-        source: { state: "playing", message: null, format: "48 kHz, stereo, f32", peak: wave(0) },
+        source: { state: "playing", message: null, format: "48 kHz, stereo", peak: wave(0) },
         outputs: enabled.map((o) =>
           o.id === "wasapi:hdmi"
             ? { id: o.id, state: "error", message: "Device disconnected", format: null, peak: 0 }
-            : { id: o.id, state: "playing", message: null, format: "48 kHz, stereo, f32", peak: wave(0) * o.fader },
+            : { id: o.id, state: "playing", message: null, format: "48 kHz, stereo", peak: wave(0) * o.fader },
         ),
       });
     case "set_output_enabled": {

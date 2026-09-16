@@ -8,13 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::devices::DESKTOP;
-use crate::dsp::fader_to_gain;
-use crate::engine::{EngineConfig, OutputSpec};
-
-/// Queue latency. Safe on every backend while staying well under lip-sync
-/// tolerance for a live stream.
-pub const LATENCY_MS: u32 = 40;
+use crate::audio::volume::fader_to_gain;
+use crate::audio::{EngineConfig, OutputSpec, DESKTOP};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -113,7 +108,6 @@ impl AppConfig {
     pub fn engine_config(&self) -> EngineConfig {
         EngineConfig {
             source: self.source.clone(),
-            latency_ms: LATENCY_MS,
             outputs: self
                 .outputs
                 .iter()
@@ -154,7 +148,6 @@ mod tests {
 
         let ec = loaded.engine_config();
         assert_eq!(ec.outputs.len(), 1);
-        assert_eq!(ec.latency_ms, LATENCY_MS);
         assert!(ec.outputs[0].gain > 0.0 && ec.outputs[0].gain < 1.0);
 
         std::fs::write(

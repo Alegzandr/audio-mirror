@@ -1,7 +1,5 @@
+pub mod audio;
 pub mod config;
-pub mod devices;
-pub mod dsp;
-pub mod engine;
 mod tray;
 mod updater;
 
@@ -12,9 +10,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
+use audio::{DeviceList, Engine, Status};
 use config::AppConfig;
-use devices::DeviceList;
-use engine::{Engine, Status};
 
 /// Argument passed by the login item: start in the tray, panel hidden.
 const AUTOSTART_ARG: &str = "--autostart";
@@ -53,10 +50,9 @@ struct Snapshot {
 
 #[tauri::command]
 async fn snapshot(app: AppHandle, state: State<'_, AppState>) -> Result<Snapshot, String> {
-    let devices =
-        tauri::async_runtime::spawn_blocking(|| devices::enumerate(&cpal::default_host()))
-            .await
-            .map_err(|e| e.to_string())??;
+    let devices = tauri::async_runtime::spawn_blocking(audio::enumerate)
+        .await
+        .map_err(|e| e.to_string())??;
     Ok(Snapshot {
         version: app.package_info().version.to_string(),
         config: state.config.lock().clone(),
@@ -102,7 +98,9 @@ fn set_output_volume(
     let mut cfg = state.config.lock();
     cfg.output_mut(&id, &name).fader = fader;
     state.save(&cfg)?;
-    state.engine.set_gain(&id, dsp::fader_to_gain(fader));
+    state
+        .engine
+        .set_gain(&id, audio::volume::fader_to_gain(fader));
     Ok(())
 }
 

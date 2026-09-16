@@ -20,7 +20,7 @@ Audio Mirror takes one audio source (desktop audio, a loopback capture of a spec
 
 ## Positioning
 
-Reproduces how OBS Studio monitors audio (shared mode, resampling to each output's native format, prefill, feedback-loop protection) without running OBS, and for several outputs at once.
+Behaves exactly like OBS Studio's audio monitoring, which streamers already trust during live sessions, without OBS's interface and for several outputs at once.
 
 ## Operating Context
 
@@ -29,10 +29,11 @@ A tray icon. Left click unfolds a small panel above the taskbar (like OneDrive),
 ## Capabilities and Constraints
 
 - One source at a time, N outputs, per-output volume (OBS logarithmic fader curve) and mute.
-- Minimum settings, maximum decisions made for the user: mirroring runs whenever an output is on; latency is fixed at 40 ms; updates are checked, downloaded and installed silently, the panel only offers a restart; start with system is enabled on first launch and can be turned off.
+- The audio engine reproduces OBS Studio's desktop capture and monitoring behavior on each platform, including its buffering; the only additions are 1 to N outputs, per-output mute and retrying monitors.
+- Minimum settings, maximum decisions made for the user: mirroring runs whenever an output is on; updates are checked, downloaded and installed silently, the panel only offers a restart; start with system is enabled on first launch and can be turned off.
 - An output captured by the source can never be a destination.
 - Portable executables for Windows, Linux (AppImage) and macOS; updates from the latest GitHub release.
-- Desktop capture: macOS 14.6 or later, PulseAudio or PipeWire on Linux.
+- Desktop capture: macOS 13 or later (ScreenCaptureKit, Screen Recording permission), PulseAudio or PipeWire on Linux.
 - English only for now; more languages later. All code and comments in English.
 
 ## Brand Commitments

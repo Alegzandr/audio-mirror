@@ -11,35 +11,49 @@ Grab the file for your system from the [latest release](https://github.com/Alegz
 | System | File | Notes |
 | --- | --- | --- |
 | Windows 10/11 (x64) | `Audio-Mirror_<version>_windows_x64_portable.exe` | Needs the WebView2 runtime, already present on Windows 11. The binary is not code-signed, so SmartScreen may ask for confirmation. |
-| macOS 10.15+ (Apple Silicon and Intel) | `Audio-Mirror_<version>_macos_universal.zip` | Desktop audio capture needs macOS 14.6+. The app is not notarized: after unzipping, run `xattr -cr "Audio Mirror.app"` once. |
+| macOS 13+ (Apple Silicon and Intel) | `Audio-Mirror_<version>_macos_universal.zip` | Desktop audio asks for the Screen Recording permission, like OBS. The app is not notarized: after unzipping, run `xattr -cr "Audio Mirror.app"` once. |
 | Linux (x86_64) | `Audio-Mirror_<version>_linux_x86_64.AppImage` | `chmod +x` it first. Desktop audio needs PulseAudio or PipeWire (pipewire-pulse). |
 
 The app starts with the system after its first launch (it can be turned off in the panel), and updates itself from the latest release: the update is downloaded, its signature verified and installed in the background, and the panel offers a restart.
 
 ## How it works
 
-The audio path follows OBS Studio's audio monitoring (`libobs/audio-monitoring`):
+The audio engine is a port of OBS Studio's desktop audio capture and audio monitoring, with one difference: a source feeds N monitors instead of one. Everything else follows the OBS code path by path.
 
-- **Desktop audio** is a loopback capture of the default output: WASAPI loopback on Windows, a CoreAudio process tap on macOS, the default sink's `.monitor` source on PulseAudio. When the default output changes, the capture follows it.
-- **Each output** gets its own lock-free queue, a resampler to the device's native rate and channel layout, a 40 ms prefill before playback starts, and the volume applied just before the samples are written, with a short ramp to avoid clicks. The volume slider uses OBS's logarithmic fader curve.
-- **Clock drift** between the source and each output is absorbed by steering the resampling ratio (within 0.5%) to keep the queue level steady. When a queue still runs dry, the output plays silence and prefills again; when it fills up, the excess is dropped, as OBS does.
-- **Feedback protection**: the output being captured can never be a destination (the equivalent of `OBS_SOURCE_DO_NOT_SELF_MONITOR`).
-- **Reconnection**: a supervisor thread rebuilds any stream that fails every 3 seconds, like OBS's WASAPI plugin.
+| | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Desktop audio | WASAPI loopback of the default output (`win-wasapi`) | ScreenCaptureKit, this app's own audio excluded (`mac-sck-audio-capture.m`) | Default sink's `.monitor` (`pulse-input.c`) |
+| Other sources | Loopback of a given output, input devices | Input devices through AUHAL (`mac-audio.c`), loopback drivers as output captures | Other monitors, input sources |
+| Monitoring | Written to WASAPI as each packet arrives, client reopened on failure (`wasapi-output.c`) | AudioQueue, three 30 ms buffers, 90 ms prefill (`coreaudio-output.c`) | Corked stream uncorked at 25 ms, buffer grown on backlog (`pulseaudio-output.c`) |
+| Reconnection | Capture retries every 3 s and restarts when the default output changes; monitors are rebuilt on that change | Input capture retries every 2 s | Streams are reopened after 3 s |
 
-Code layout, in `src-tauri/src`:
+Shared by all platforms, as in libobs:
 
-| File | Role |
+- Each source is converted to 48 kHz stereo float (`process_audio`), then handed to the monitors on the capture thread (`source_signal_audio_data`).
+- Each monitor converts to its device format with FFmpeg's libswresample, using OBS's settings and mono upmix matrix, then applies its volume. The slider uses OBS's logarithmic fader curve.
+- An output recorded by the source is never a destination (`OBS_SOURCE_DO_NOT_SELF_MONITOR`). On macOS the capture leaves this app out, so any output can be used.
+
+Two things OBS does not do, because a background service needs them: a monitor whose device cannot be opened is retried every 3 seconds, and each output has its own mute.
+
+Code layout, in `src-tauri/src/audio`:
+
+| File | Port of |
 | --- | --- |
-| `dsp.rs` | Real-time path: queues, resampling, channel remapping, volume, drift control |
-| `engine.rs` | cpal streams, supervisor, reconnection, status |
-| `devices.rs` | Device enumeration, source resolution, loopback handling |
-| `config.rs` | Persisted choices |
-| `tray.rs` | Tray icon and panel placement |
-| `updater.rs` | Silent updates |
+| `hub.rs` | Audio half of `obs-source.c` |
+| `swr.rs` | `media-io/audio-resampler-ffmpeg.c` |
+| `wasapi.rs` | `win-wasapi.cpp`, `audio-monitoring/win32` |
+| `coreaudio.rs` | `mac-sck-audio-capture.m`, `mac-audio.c`, `audio-monitoring/osx` |
+| `pulse.rs` | `pulse-input.c`, `audio-monitoring/pulse` |
+| `mod.rs` | Session and monitor lifecycle (`audio_monitor_create`, `obs_reset_audio_monitoring`) |
 
 ## Development
 
-Requirements: Rust (stable), Node.js 22. On Linux, run `scripts/linux-deps.sh` for the system libraries.
+Requirements: Rust (stable), Node.js 22, and FFmpeg's libavutil and libswresample as static libraries:
+
+- Windows: `vcpkg install ffmpeg[core,swresample]:x64-windows-static-md` (with `VCPKG_ROOT` set, or vcpkg cloned next to this repository)
+- macOS and Linux: `scripts/build-ffmpeg.sh <rust-target>` (on Linux, run `scripts/linux-deps.sh` first)
+
+`FFMPEG_DIR` can point at any other prefix.
 
 ```sh
 npm ci

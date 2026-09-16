@@ -49,10 +49,13 @@ jobs:
         include:
           - name: windows
             os: windows-latest
+            ffmpeg: x86_64-pc-windows-msvc
           - name: linux
             os: ubuntu-22.04
+            ffmpeg: x86_64-unknown-linux-gnu
           - name: macos
             os: macos-latest
+            ffmpeg: aarch64-apple-darwin x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.verify.outputs.version }}
@@ -70,6 +73,9 @@ jobs:
       - name: Dépendances système
         if: runner.os == 'Linux'
         run: ./scripts/linux-deps.sh
+      - uses: ./.github/actions/ffmpeg
+        with:
+          targets: ${{ matrix.ffmpeg }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri

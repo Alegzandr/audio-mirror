@@ -4,7 +4,5 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>Audio Mirror captures the selected input to play it on your outputs.</string>
-  <key>NSAudioCaptureUsageDescription</key>
-  <string>Audio Mirror captures system audio to play it on your outputs.</string>
 </dict>
 </plist>
