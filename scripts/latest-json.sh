@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Produit le latest.json lu par l'updater de Tauri.
-# Usage : latest-json.sh <dossier> <version> <owner/repo> <tag>
+# Produces the latest.json read by the Tauri updater.
+# Usage: latest-json.sh <dir> <version> <owner/repo> <tag>
 set -euo pipefail
 dir=$1 version=$2 repo=$3 tag=$4
 base="https://github.com/${repo}/releases/download/${tag}"
@@ -8,7 +8,7 @@ base="https://github.com/${repo}/releases/download/${tag}"
 entry() {
   local file=$1
   [ -f "$dir/$file" ] && [ -f "$dir/$file.sig" ] || {
-    echo "Fichier ou signature manquant : $file" >&2
+    echo "Missing file or signature: $file" >&2
     exit 1
   }
   jq -n --arg url "$base/$file" --rawfile sig "$dir/$file.sig" '{url: $url, signature: $sig}'

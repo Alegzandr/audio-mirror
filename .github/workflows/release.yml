@@ -12,7 +12,7 @@ env:
 
 jobs:
   verify:
-    name: Vérifier le tag
+    name: Verify tag
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -21,17 +21,17 @@ jobs:
         with:
           fetch-depth: 0
       - id: v
-        name: Tag, version et branche
+        name: Tag, version and branch
         run: |
           tag="${GITHUB_REF_NAME}"
           version="${tag#v}"
           cargo_version=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d '"' -f2)
           if [ "$version" != "$cargo_version" ]; then
-            echo "::error::Le tag $tag ne correspond pas à la version $cargo_version de Cargo.toml"
+            echo "::error::Tag $tag does not match version $cargo_version in Cargo.toml"
             exit 1
           fi
           if ! git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main$'; then
-            echo "::error::Le tag $tag doit pointer sur un commit de main"
+            echo "::error::Tag $tag must point to a commit on main"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -70,7 +70,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-      - name: Dépendances système
+      - name: System dependencies
         if: runner.os == 'Linux'
         run: ./scripts/linux-deps.sh
       - uses: ./.github/actions/ffmpeg
@@ -81,7 +81,7 @@ jobs:
           workspaces: src-tauri
       - run: npm ci
 
-      - name: Windows, exécutable portable
+      - name: Windows, portable executable
         if: matrix.name == 'windows'
         shell: bash
         run: |
@@ -101,7 +101,7 @@ jobs:
           cp "$dir"/*.AppImage "$out"
           cp "$dir"/*.AppImage.sig "$out.sig"
 
-      - name: macOS, app universelle
+      - name: macOS, universal app
         if: matrix.name == 'macos'
         run: |
           npx tauri build --target universal-apple-darwin --bundles app
@@ -119,7 +119,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publier la release
+    name: Publish release
     needs: [verify, build]
     runs-on: ubuntu-22.04
     env:
@@ -132,7 +132,7 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - name: Manifeste de mise à jour
+      - name: Update manifest
         run: ./scripts/latest-json.sh dist "$VERSION" "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" > dist/latest.json
       - name: Release GitHub
         run: |
