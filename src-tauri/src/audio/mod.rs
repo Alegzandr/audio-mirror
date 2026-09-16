@@ -195,6 +195,7 @@ impl Default for Status {
 
 enum Cmd {
     Apply(EngineConfig),
+    Restart,
     System(SystemEvent),
     Shutdown,
 }
@@ -254,6 +255,13 @@ impl Engine {
             }
         }
         let _ = self.tx.send(Cmd::Apply(cfg));
+    }
+
+    /// Closes the capture and every output, then reopens them with the
+    /// current settings, like `obs_reset_audio_monitoring` plus a source
+    /// restart.
+    pub fn restart(&self) {
+        let _ = self.tx.send(Cmd::Restart);
     }
 
     /// Volume changes apply on the next packet, like `user_volume` in OBS.
@@ -388,6 +396,13 @@ impl Supervisor {
         loop {
             match self.rx.recv_timeout(TICK) {
                 Ok(Cmd::Apply(cfg)) => self.apply(cfg),
+                Ok(Cmd::Restart) => {
+                    if let Some(cfg) = self.cfg.take() {
+                        log::info!("restarting audio");
+                        self.session = None;
+                        self.apply(cfg);
+                    }
+                }
                 Ok(Cmd::System(event)) => self.system(event),
                 Ok(Cmd::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                     self.session = None;
@@ -606,6 +621,12 @@ mod tests {
         assert_eq!(st.outputs.len(), 1);
         assert_eq!(st.outputs[0].state, NodeState::Error);
 
+        engine.restart();
+        std::thread::sleep(Duration::from_millis(600));
+        let st = engine.status();
+        assert!(st.running, "restart keeps the configuration");
+        assert_eq!(st.outputs.len(), 1);
+
         engine.set_gain("missing-output", 0.1);
         assert_eq!(engine.shared.lock()["missing-output"].gain.load(), 0.1);
 
@@ -674,5 +695,11 @@ output peak over 3 s: {peak}"
         if audible {
             assert!(peak > 0.01, "no audio reached the output");
         }
+
+        engine.restart();
+        std::thread::sleep(Duration::from_millis(1500));
+        let st = engine.status();
+        assert_eq!(st.source.state, NodeState::Playing, "after restart");
+        assert_eq!(st.outputs[0].state, NodeState::Playing, "after restart");
     }
 }

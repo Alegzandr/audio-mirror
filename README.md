@@ -1,6 +1,6 @@
 # Audio Mirror
 
-Plays one audio source on several output devices at once, each with its own volume. It lives in the tray: left click opens the panel, right click offers Open and Quit.
+Plays one audio source on several output devices at once, each with its own volume. It lives in the tray: left click opens the panel, right click offers Open, Restart audio and Quit.
 
 Typical use: hear your desktop audio in your headphones while also sending it to a virtual cable, a capture card or a second computer.
 

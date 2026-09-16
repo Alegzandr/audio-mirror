@@ -24,7 +24,7 @@ Behaves exactly like OBS Studio's audio monitoring, which streamers already trus
 
 ## Operating Context
 
-A tray icon. Left click unfolds a small panel above the taskbar (like OneDrive), right click offers Open and Quit. Opened briefly next to OBS, a game or a DAW: check the sound flows, adjust a volume, mute an output.
+A tray icon. Left click unfolds a small panel above the taskbar (like OneDrive), right click offers Open, Restart audio and Quit. Opened briefly next to OBS, a game or a DAW: check the sound flows, adjust a volume, mute an output.
 
 ## Capabilities and Constraints
 

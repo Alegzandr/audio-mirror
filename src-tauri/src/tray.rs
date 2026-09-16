@@ -38,9 +38,11 @@ fn now_ms() -> u64 {
 
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Audio Mirror", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "Restart audio", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &sep, &quit])?;
+    let sep_quit = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&open, &sep, &restart, &sep_quit, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("Audio Mirror")
@@ -48,6 +50,7 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_panel(app),
+            "restart" => restart_audio(app),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -90,6 +93,15 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
         });
     }
     Ok(())
+}
+
+/// "Restart audio": reopens the capture and every output, and reloads the
+/// panel so it reads fresh devices and state.
+fn restart_audio(app: &AppHandle) {
+    app.state::<crate::AppState>().engine.restart();
+    if let Some(panel) = app.get_webview_window(PANEL) {
+        let _ = panel.reload();
+    }
 }
 
 fn hide(panel: &WebviewWindow) {
