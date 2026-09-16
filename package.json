@@ -1,15 +1,16 @@
 {
   "name": "audio-mirror",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "check:ui": "node --check ui/app.js && node --check ui/splash.js"
+    "check:ui": "tsc -p tsconfig.json"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.11.4"
+    "@tauri-apps/cli": "2.11.4",
+    "typescript": "^7.0.2"
   }
 }

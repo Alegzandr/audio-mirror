@@ -34,7 +34,7 @@ A tray icon. Left click unfolds a small panel above the taskbar (like OneDrive),
 - An output captured by the source can never be a destination.
 - One file per system: a self-installing executable on Windows (per user, no installer window, like Discord), an AppImage on Linux, an app bundle on macOS; updates from the latest GitHub release.
 - Desktop capture: macOS 13 or later (ScreenCaptureKit, Screen Recording permission), PulseAudio or PipeWire on Linux.
-- English only for now; more languages later. All code and comments in English.
+- Interface in English and French, following the system language (English otherwise). All code and comments in English.
 
 ## Brand Commitments
 

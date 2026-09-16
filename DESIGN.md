@@ -247,7 +247,7 @@ Header: app title left, run-state sentence right (secondary ink idle, ink when r
 - **Do** write every state as text, and use Error Red only for error text.
 - **Do** keep meters as 2px gray bars with a dB number beside them.
 - **Do** follow the OS theme for all neutrals, using each token's `-dark` counterpart.
-- **Do** keep all UI copy in English.
+- **Do** write UI copy in English first, then translate it in every supported language (`ui/i18n.js`, tray menu in `src-tauri/src/i18n.rs`), and check that the French copy still fits the 380px panel.
 
 ### Don't:
 - **Don't** use icons of any kind, including Lucide or custom-drawn ones.

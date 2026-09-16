@@ -3,19 +3,24 @@
 // Startup update check, shown before the app starts (see updater.rs).
 
 const tauri = window.__TAURI__;
+/** @type {Invoke} */
 const invoke = tauri ? tauri.core.invoke : demoInvoke;
+
+const { t } = window.I18n;
 
 const POLL_MS = 100;
 
+/** @type {Record<Progress["stage"], string>} */
 const STAGE_LABELS = {
-  checking: "Checking for updates…",
-  downloading: "Downloading update…",
-  installing: "Installing update…",
-  restarting: "Restarting…",
+  checking: t("splash.checking"),
+  downloading: t("splash.downloading"),
+  installing: t("splash.installing"),
+  restarting: t("splash.restarting"),
 };
 
-const stage = document.getElementById("stage");
-const bar = document.getElementById("bar");
+const stage = /** @type {HTMLElement} */ (document.getElementById("stage"));
+const bar = /** @type {HTMLElement} */ (document.getElementById("bar"));
+const fill = /** @type {HTMLElement} */ (bar.firstElementChild);
 
 async function poll() {
   let progress;
@@ -25,13 +30,13 @@ async function poll() {
     return;
   }
   let text = STAGE_LABELS[progress.stage] ?? STAGE_LABELS.checking;
-  const known = progress.stage === "downloading" && progress.percent != null;
-  if (known) text = `Downloading update, ${progress.percent}%`;
+  const percent = progress.stage === "downloading" ? progress.percent : null;
+  if (percent != null) text = t("splash.downloadingPercent", { percent });
   if (stage.textContent !== text) stage.textContent = text;
-  bar.hidden = !known;
-  if (known) {
-    bar.setAttribute("aria-valuenow", progress.percent);
-    bar.firstElementChild.style.transform = `scaleX(${progress.percent / 100})`;
+  bar.hidden = percent == null;
+  if (percent != null) {
+    bar.setAttribute("aria-valuenow", String(percent));
+    fill.style.transform = `scaleX(${percent / 100})`;
   }
 }
 
@@ -42,10 +47,18 @@ setInterval(poll, POLL_MS);
 
 /* Demo data, only outside Tauri (browser preview): loops through the stages. */
 
-function demoInvoke() {
+/**
+ * @template {Command} K
+ * @param {K} _cmd Always `update_progress` here.
+ * @param {CommandArgs<K>} _args
+ * @returns {Promise<CommandResult<K>>}
+ */
+function demoInvoke(_cmd, ..._args) {
   const t = (performance.now() / 1000) % 8;
-  if (t < 2) return Promise.resolve({ stage: "checking", percent: null });
-  if (t < 6) return Promise.resolve({ stage: "downloading", percent: Math.round(((t - 2) / 4) * 100) });
-  if (t < 7) return Promise.resolve({ stage: "installing", percent: null });
-  return Promise.resolve({ stage: "restarting", percent: null });
+  /** @type {Progress} */
+  let progress = { stage: "restarting", percent: null };
+  if (t < 2) progress = { stage: "checking", percent: null };
+  else if (t < 6) progress = { stage: "downloading", percent: Math.round(((t - 2) / 4) * 100) };
+  else if (t < 7) progress = { stage: "installing", percent: null };
+  return Promise.resolve(/** @type {any} */ (progress));
 }

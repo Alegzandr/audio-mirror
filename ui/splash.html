@@ -6,13 +6,14 @@
   <meta name="color-scheme" content="light dark">
   <title>Audio Mirror</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="i18n.js" defer></script>
   <script src="splash.js" defer></script>
 </head>
 <body>
   <div class="splash">
     <h1>Audio Mirror</h1>
-    <p class="splash-state" id="stage" aria-live="polite">Checking for updates…</p>
-    <div class="meter splash-meter" id="bar" role="progressbar" aria-label="Download" aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
+    <p class="splash-state" id="stage" aria-live="polite" data-i18n="splash.checking">Checking for updates…</p>
+    <div class="meter splash-meter" id="bar" role="progressbar" aria-label="Download" data-i18n-aria-label="splash.download" aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
   </div>
 </body>
 </html>

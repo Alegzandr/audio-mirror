@@ -9,6 +9,7 @@
 //! from Installed apps, undoes it all and keeps the settings.
 
 use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,6 +20,10 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
 };
+use windows::Win32::System::LibraryLoader::{
+    SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
+use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
@@ -40,6 +45,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Runs before Tauri starts. Returns false when this process must exit
 /// (the installed copy was launched, or the app was uninstalled).
 pub fn prepare() -> bool {
+    restrict_dll_search();
     // Development builds run from the target folder.
     if cfg!(debug_assertions) {
         return true;
@@ -89,6 +95,25 @@ fn shortcut_path() -> Option<PathBuf> {
             .join(r"Microsoft\Windows\Start Menu\Programs")
             .join(format!("{PRODUCT}.lnk"))
     })
+}
+
+fn system32() -> PathBuf {
+    let mut buf = [0u16; 260];
+    // SAFETY: the buffer outlives the call and its length is passed with it.
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    if len == 0 || len > buf.len() {
+        return PathBuf::from(r"C:\Windows\System32");
+    }
+    PathBuf::from(OsString::from_wide(&buf[..len]))
+}
+
+/// Keeps DLLs loaded by name from being picked up next to the executable,
+/// which for a setup file is usually the Downloads folder.
+fn restrict_dll_search() {
+    // SAFETY: plain flag setter, called before any other thread exists.
+    if let Err(e) = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) } {
+        log::warn!("dll search: {e}");
+    }
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -169,7 +194,8 @@ fn create_shortcut(target: &Path, link: &Path) -> windows::core::Result<()> {
 
 fn uninstall(dir: &Path) -> io::Result<()> {
     // Other copies keep their executable and WebView2 files locked.
-    let _ = Command::new("taskkill")
+    // Full path: a bare name is also looked up next to this executable.
+    let _ = Command::new(system32().join("taskkill.exe"))
         .args(["/F", "/T", "/IM", EXE_NAME, "/FI"])
         .arg(format!("PID ne {}", std::process::id()))
         .creation_flags(CREATE_NO_WINDOW)

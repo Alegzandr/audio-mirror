@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod config;
+mod i18n;
 #[cfg(windows)]
 mod install;
 mod tray;
@@ -14,6 +15,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use audio::{DeviceList, Engine, Status};
 use config::AppConfig;
+use i18n::Lang;
 
 /// Argument passed by the login item: start in the tray, panel hidden.
 const AUTOSTART_ARG: &str = "--autostart";
@@ -22,6 +24,7 @@ pub(crate) struct AppState {
     config: Mutex<AppConfig>,
     path: PathBuf,
     engine: Engine,
+    pub(crate) lang: Lang,
     /// Version already installed and waiting for a restart.
     pub(crate) update_ready: Mutex<Option<String>>,
 }
@@ -185,7 +188,10 @@ pub fn run() {
         return;
     }
 
+    let lang = Lang::detect();
+
     tauri::Builder::default()
+        .plugin(i18n::plugin(lang))
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             // During the startup update check, the splash is already showing.
             if app.get_webview_window(updater::SPLASH).is_none() {
@@ -197,7 +203,7 @@ pub fn run() {
             Some(vec![AUTOSTART_ARG]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -209,6 +215,7 @@ pub fn run() {
                 config: Mutex::new(config),
                 path,
                 engine: Engine::new(),
+                lang,
                 update_ready: Mutex::new(None),
             });
             app.manage(updater::SplashState::default());

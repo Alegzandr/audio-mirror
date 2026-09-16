@@ -6,6 +6,8 @@
 set -eu
 
 VERSION=9.0.1
+# Checked after download: the archive is only trusted if it matches.
+SHA256=cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635
 TARGET=${1:?rust target triple}
 shift
 
@@ -21,7 +23,18 @@ fi
 mkdir -p "$ROOT/third_party/build"
 ARCHIVE="$ROOT/third_party/build/ffmpeg-$VERSION.tar.xz"
 if [ ! -f "$ARCHIVE" ]; then
-  curl -fsSL "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$ARCHIVE"
+  curl -fsSL --proto '=https' --tlsv1.2 "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$ARCHIVE.part"
+  mv "$ARCHIVE.part" "$ARCHIVE"
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL=$(sha256sum "$ARCHIVE" | cut -d ' ' -f1)
+else
+  ACTUAL=$(shasum -a 256 "$ARCHIVE" | cut -d ' ' -f1)
+fi
+if [ "$ACTUAL" != "$SHA256" ]; then
+  echo "Checksum mismatch for $ARCHIVE (got $ACTUAL)" >&2
+  rm -f "$ARCHIVE"
+  exit 1
 fi
 rm -rf "$WORK"
 mkdir -p "$WORK"
