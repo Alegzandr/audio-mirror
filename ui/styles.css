@@ -439,3 +439,29 @@ main {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }
+
+/* Startup update splash (splash.html) */
+
+.splash {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 20px;
+}
+.splash h1 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.splash-state { color: var(--text-2); }
+.splash-meter {
+  flex: none;
+  margin-top: 6px;
+}
+.splash-meter span {
+  background: var(--accent);
+  transition: transform 0.1s linear;
+}
+.splash-meter[hidden] { display: block; visibility: hidden; }

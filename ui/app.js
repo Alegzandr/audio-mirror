@@ -352,6 +352,13 @@ function localOutput(node) {
 }
 
 $("outputs").addEventListener("change", async (e) => {
+  if (e.target.classList.contains("fader")) {
+    // Released: save the final position.
+    const node = e.target.closest(".output");
+    const fader = Number(e.target.value) / 1000;
+    call("set_output_volume", { id: node.dataset.id, name: node.dataset.name, fader, persist: true });
+    return;
+  }
   if (!e.target.classList.contains("output-enabled")) return;
   const node = e.target.closest(".output");
   const enabled = e.target.checked;
@@ -382,7 +389,7 @@ $("outputs").addEventListener("input", (e) => {
   requestAnimationFrame(() => {
     const fader = pendingVolume.get(id);
     pendingVolume.delete(id);
-    call("set_output_volume", { id, name: node.dataset.name, fader });
+    call("set_output_volume", { id, name: node.dataset.name, fader, persist: false });
   });
 });
 
@@ -443,7 +450,6 @@ function demoInvoke(cmd, args) {
   const demo = (window.__demo ||= {
     config: {
       source: "desktop",
-      onboarded: true,
       outputs: [
         { id: "wasapi:headset", name: "Headphones (USB Audio)", enabled: true, fader: 0.82, muted: false },
         { id: "wasapi:cable", name: "CABLE Input (VB-Audio Virtual Cable)", enabled: true, fader: 1, muted: false },
@@ -464,7 +470,7 @@ function demoInvoke(cmd, args) {
         config: structuredClone(demo.config),
         devices: {
           sources: [
-            { id: "desktop", name: "Desktop audio", kind: "desktop", is_default: false, captures_output: "wasapi:speakers" },
+            { id: "desktop", name: "Default output (Speakers (Realtek Audio))", kind: "desktop", is_default: false, captures_output: "wasapi:speakers" },
             { id: "output:wasapi:speakers", name: "Speakers (Realtek Audio)", kind: "loopback", is_default: true, captures_output: "wasapi:speakers" },
             { id: "output:wasapi:headset", name: "Headphones (USB Audio)", kind: "loopback", is_default: false, captures_output: "wasapi:headset" },
             { id: "input:wasapi:mic", name: "Microphone (Shure MV7)", kind: "capture", is_default: true, captures_output: null },

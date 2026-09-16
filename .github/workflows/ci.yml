@@ -16,14 +16,14 @@ env:
 
 jobs:
   lint:
-    name: Format et lint
+    name: Format and lint
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Dépendances système
+      - name: System dependencies
         run: ./scripts/linux-deps.sh
       - uses: ./.github/actions/ffmpeg
         with:
@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - name: Syntaxe de l'interface
+      - name: Frontend syntax
         run: node --check ui/app.js
 
   test:
@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Dépendances système
+      - name: System dependencies
         if: runner.os == 'Linux'
         run: ./scripts/linux-deps.sh
       - uses: ./.github/actions/ffmpeg

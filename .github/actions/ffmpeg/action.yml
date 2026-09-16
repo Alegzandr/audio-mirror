@@ -9,7 +9,7 @@ runs:
   steps:
     - name: Cache (vcpkg)
       if: runner.os == 'Windows'
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ${{ env.LOCALAPPDATA }}\vcpkg\archives
         key: vcpkg-ffmpeg-${{ runner.os }}-${{ hashFiles('.github/actions/ffmpeg/action.yml') }}
@@ -22,7 +22,7 @@ runs:
 
     - name: Cache (source build)
       if: runner.os != 'Windows'
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: third_party/ffmpeg
         key: ffmpeg-${{ runner.os }}-${{ inputs.targets }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}

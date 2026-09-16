@@ -2,8 +2,8 @@
 //! pipewire-pulse).
 //!
 //! - Capture: port of `plugins/linux-pulseaudio/pulse-input.c`: desktop audio
-//!   is the default sink's `.monitor`, resolved once; 25 ms fragments; the
-//!   first 500 ms are dropped.
+//!   is the default sink's `.monitor`, reopened when the default sink
+//!   changes; 25 ms fragments; the first 500 ms are dropped.
 //! - Monitoring: port of `libobs/audio-monitoring/pulse/pulseaudio-output.c`:
 //!   a corked stream with a 25 ms target, uncorked once that much audio is
 //!   queued, written from the capture thread, with the Pulse buffer grown
@@ -29,7 +29,7 @@ use super::swr::Resampler;
 use super::volume::{scale_s16, scale_s32, scale_u8, OutputShared};
 use super::{
     describe, Capture, CaptureState, DeviceList, Monitor, MonitorInit, MonitorState, OutputInfo,
-    SourceInfo, SourceKind, SystemEvent, DESKTOP,
+    SourceInfo, SourceKind, SystemEvent, DESKTOP, DESKTOP_NAME,
 };
 
 const OUTPUT_PREFIX: &str = "output:";
@@ -43,11 +43,119 @@ const STARTUP_TIMEOUT_NS: u64 = 500_000_000;
 
 pub fn init_thread() {}
 
+/// Follows the default sink, which OBS resolves only once: the desktop
+/// capture is reopened on the new sink's monitor, like `win-wasapi` does.
 pub fn watch_system(
-    _callback: Box<dyn Fn(SystemEvent) + Send + Sync>,
+    callback: Box<dyn Fn(SystemEvent) + Send + Sync>,
 ) -> Option<Box<dyn std::any::Any + Send + Sync>> {
-    // OBS does not follow PulseAudio server changes.
-    None
+    let pulse = PulseLoop::new("Audio Mirror Watcher");
+    let default_sink = pulse.server_info().map(|d| d.default_sink);
+    let data = Box::new(WatchData {
+        callback,
+        default_sink: Mutex::new(default_sink.clone().unwrap_or_default()),
+    });
+    let watcher = Watcher { pulse, data };
+    default_sink?;
+
+    let userdata = &*watcher.data as *const WatchData as *mut c_void;
+    let guard = watcher.pulse.lock();
+    // SAFETY: context used under the lock; `data` outlives the subscription,
+    // which `Watcher::drop` removes first.
+    unsafe {
+        let context = watcher.pulse.context;
+        pa_context_set_subscribe_callback(context, Some(watch_event), userdata);
+        let op = pa_context_subscribe(
+            context,
+            PA_SUBSCRIPTION_MASK_SERVER | PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE,
+            None,
+            ptr::null_mut(),
+        );
+        if !op.is_null() {
+            pa_operation_unref(op);
+        }
+    }
+    drop(guard);
+    Some(Box::new(watcher))
+}
+
+struct WatchData {
+    callback: Box<dyn Fn(SystemEvent) + Send + Sync>,
+    default_sink: Mutex<String>,
+}
+
+struct Watcher {
+    pulse: PulseLoop,
+    data: Box<WatchData>,
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        let (mainloop, context) = (self.pulse.mainloop, self.pulse.context);
+        // SAFETY: the loop and context are owned by this watcher only.
+        unsafe {
+            pa_threaded_mainloop_lock(mainloop);
+            pa_context_set_subscribe_callback(context, None, ptr::null_mut());
+            pa_context_set_state_callback(context, None, ptr::null_mut());
+            pa_context_disconnect(context);
+            pa_context_unref(context);
+            pa_threaded_mainloop_unlock(mainloop);
+            pa_threaded_mainloop_stop(mainloop);
+            pa_threaded_mainloop_free(mainloop);
+        }
+    }
+}
+
+extern "C" fn watch_event(
+    c: *mut pa_context,
+    t: pa_subscription_event_type_t,
+    _idx: u32,
+    userdata: *mut c_void,
+) {
+    // SAFETY: userdata is the watcher's `WatchData`.
+    let data = unsafe { &*(userdata as *const WatchData) };
+    let kind = t & PA_SUBSCRIPTION_EVENT_TYPE_MASK;
+    match t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK {
+        PA_SUBSCRIPTION_EVENT_SERVER => {
+            // Runs on the loop thread: ask without waiting for the answer.
+            // SAFETY: called by the mainloop with its lock held.
+            unsafe {
+                let op = pa_context_get_server_info(c, Some(watch_server_info), userdata);
+                if !op.is_null() {
+                    pa_operation_unref(op);
+                }
+            }
+        }
+        PA_SUBSCRIPTION_EVENT_SINK | PA_SUBSCRIPTION_EVENT_SOURCE
+            if kind != PA_SUBSCRIPTION_EVENT_CHANGE =>
+        {
+            (data.callback)(SystemEvent::DevicesChanged);
+        }
+        _ => {}
+    }
+}
+
+extern "C" fn watch_server_info(
+    _c: *mut pa_context,
+    i: *const pa_server_info,
+    userdata: *mut c_void,
+) {
+    if i.is_null() {
+        return;
+    }
+    // SAFETY: userdata is the watcher's `WatchData`, `i` is valid here.
+    let (data, sink) = unsafe {
+        (
+            &*(userdata as *const WatchData),
+            cstr((*i).default_sink_name),
+        )
+    };
+    let changed = {
+        let mut current = data.default_sink.lock();
+        std::mem::replace(&mut *current, sink.clone()) != sink
+    };
+    if changed {
+        (data.callback)(SystemEvent::DefaultOutputChanged);
+    }
 }
 
 fn os_gettime_ns() -> u64 {
@@ -504,7 +612,7 @@ pub fn enumerate() -> Result<DeviceList, String> {
     let mut list = DeviceList::default();
     list.sources.push(SourceInfo {
         id: DESKTOP.into(),
-        name: "Desktop audio".into(),
+        name: DESKTOP_NAME.into(),
         kind: SourceKind::Desktop,
         is_default: false,
         captures_output: Some(defaults.default_sink.clone()),
@@ -579,6 +687,7 @@ struct CaptureData {
 
 pub struct PulseCapture {
     data: Box<CaptureData>,
+    is_default: bool,
 }
 
 // SAFETY: the stream is only touched under the capture mainloop lock.
@@ -718,12 +827,17 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
     }
 
     log::info!("Started recording from '{device}'");
-    Ok(Box::new(PulseCapture { data }))
+    Ok(Box::new(PulseCapture { data, is_default }))
 }
 
 impl Capture for PulseCapture {
     fn state(&self) -> CaptureState {
         self.data.state.lock().clone()
+    }
+
+    /// The desktop capture records the old sink's monitor: reopen it.
+    fn default_output_changed(&self) -> bool {
+        self.is_default
     }
 }
 

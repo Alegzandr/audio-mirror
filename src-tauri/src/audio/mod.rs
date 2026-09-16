@@ -42,6 +42,7 @@ use volume::OutputShared;
 
 /// Id of the system default output, captured like OBS's "Desktop Audio".
 pub const DESKTOP: &str = "desktop";
+pub const DESKTOP_NAME: &str = "Default output";
 
 /// Retry delay for a monitor whose device could not be opened. OBS only
 /// retries on a settings change; a background service retries on its own,
@@ -81,7 +82,15 @@ pub struct DeviceList {
 }
 
 pub fn enumerate() -> Result<DeviceList, String> {
-    platform::enumerate()
+    let mut list = platform::enumerate()?;
+    // Name the device the default output currently points to.
+    if let Some(current) = list.outputs.iter().find(|o| o.is_default) {
+        let name = format!("{DESKTOP_NAME} ({})", current.name);
+        for s in list.sources.iter_mut().filter(|s| s.id == DESKTOP) {
+            s.name = name.clone();
+        }
+    }
+    Ok(list)
 }
 
 /// State of the running capture, reported by the platform.
@@ -100,8 +109,11 @@ pub enum CaptureState {
 /// A running source capture. Dropping it stops the capture.
 pub trait Capture: Send {
     fn state(&self) -> CaptureState;
-    /// The system default output changed.
-    fn default_output_changed(&self) {}
+    /// The system default output changed. Returns true when the capture
+    /// must be reopened by the session.
+    fn default_output_changed(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,6 +354,16 @@ impl Session {
         }
     }
 
+    fn reopen_capture(&mut self) {
+        // Drop the old capture before opening the device again.
+        self.capture = Err(String::new());
+        self.capture = platform::start_capture(&self.source, self.hub.clone());
+        if let Err(e) = &self.capture {
+            log::warn!("capture: {e}");
+        }
+        self.capture_retry_at = Instant::now() + MONITOR_RETRY;
+    }
+
     /// `audio_monitor_create`.
     fn create_monitor(&mut self, id: &str, shared: Arc<OutputShared>) {
         let slot = match platform::create_monitor(&self.source, id, shared) {
@@ -460,8 +482,12 @@ impl Supervisor {
         match event {
             SystemEvent::DefaultOutputChanged => {
                 log::info!("default output changed");
-                if let Ok(capture) = &session.capture {
-                    capture.default_output_changed();
+                if session
+                    .capture
+                    .as_ref()
+                    .is_ok_and(|c| c.default_output_changed())
+                {
+                    session.reopen_capture();
                 }
                 // `obs_reset_audio_monitoring`: rebuild every monitor, which
                 // also re-evaluates the feedback-loop rule.
@@ -496,13 +522,7 @@ impl Supervisor {
         if !failed {
             session.capture_retry_at = now + MONITOR_RETRY;
         } else if now >= session.capture_retry_at {
-            // Drop the old capture before opening the device again.
-            session.capture = Err(String::new());
-            session.capture = platform::start_capture(&session.source, session.hub.clone());
-            if let Err(e) = &session.capture {
-                log::warn!("capture: {e}");
-            }
-            session.capture_retry_at = now + MONITOR_RETRY;
+            session.reopen_capture();
         }
 
         let due: Vec<String> = session

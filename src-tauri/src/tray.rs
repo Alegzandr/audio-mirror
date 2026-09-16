@@ -36,7 +36,7 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn setup(app: &tauri::App) -> tauri::Result<()> {
+pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Audio Mirror", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "Restart audio", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;

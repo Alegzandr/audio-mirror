@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Tray panel",
-  "windows": ["main"],
+  "description": "Tray panel and update splash",
+  "windows": ["main", "splash"],
   "permissions": ["core:default"]
 }

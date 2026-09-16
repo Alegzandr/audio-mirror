@@ -40,8 +40,6 @@ impl Default for OutputConfig {
 pub struct AppConfig {
     pub source: String,
     pub outputs: Vec<OutputConfig>,
-    /// Set once the first launch has enabled start at login.
-    pub onboarded: bool,
 }
 
 impl Default for AppConfig {
@@ -49,17 +47,22 @@ impl Default for AppConfig {
         Self {
             source: DESKTOP.into(),
             outputs: Vec::new(),
-            onboarded: false,
         }
     }
 }
 
 impl AppConfig {
     pub fn load(path: &Path) -> Self {
-        let mut cfg: Self = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut cfg: Self = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+                // Keep the unreadable file aside instead of overwriting it
+                // with the next change.
+                log::warn!("config: {e}, starting from defaults");
+                let _ = std::fs::rename(path, path.with_extension("json.bak"));
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        };
         if cfg.source.is_empty() {
             cfg.source = DESKTOP.into();
         }
@@ -159,6 +162,12 @@ mod tests {
         assert_eq!(bad.outputs.len(), 1);
         assert_eq!(bad.outputs[0].fader, 1.0);
         assert_eq!(bad.source, DESKTOP);
+
+        let backup = path.with_extension("json.bak");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(AppConfig::load(&path), AppConfig::default());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{ not json");
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -16,7 +16,7 @@ Streamers and content creators on Windows, macOS or Linux. During a live stream 
 
 ## Product Purpose
 
-Audio Mirror takes one audio source (desktop audio, a loopback capture of a specific output, or an input device) and plays it on N output devices at once, each with its own volume. Success: set it once, it lives in the tray, starts with the system, and reconnects by itself when a device comes back.
+Audio Mirror takes one audio source (the default output, a loopback capture of a specific output, or an input device) and plays it on N output devices at once, each with its own volume. Success: set it once, it lives in the tray, can start with the system, and reconnects by itself when a device comes back.
 
 ## Positioning
 
@@ -30,9 +30,9 @@ A tray icon. Left click unfolds a small panel above the taskbar (like OneDrive),
 
 - One source at a time, N outputs, per-output volume (OBS logarithmic fader curve) and mute.
 - The audio engine reproduces OBS Studio's desktop capture and monitoring behavior on each platform, including its buffering; the only additions are 1 to N outputs, per-output mute and retrying monitors.
-- Minimum settings, maximum decisions made for the user: mirroring runs whenever an output is on; updates are checked, downloaded and installed silently, the panel only offers a restart; start with system is enabled on first launch and can be turned off.
+- Minimum settings, maximum decisions made for the user: mirroring runs whenever an output is on; every launch checks for an update in a small splash window and applies it before starting, updates found while running install silently and the panel only offers a restart; start with system is off by default and turned on by the user in the panel.
 - An output captured by the source can never be a destination.
-- Portable executables for Windows, Linux (AppImage) and macOS; updates from the latest GitHub release.
+- One file per system: a self-installing executable on Windows (per user, no installer window, like Discord), an AppImage on Linux, an app bundle on macOS; updates from the latest GitHub release.
 - Desktop capture: macOS 13 or later (ScreenCaptureKit, Screen Recording permission), PulseAudio or PipeWire on Linux.
 - English only for now; more languages later. All code and comments in English.
 
