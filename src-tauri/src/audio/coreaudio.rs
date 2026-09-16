@@ -42,7 +42,7 @@ use super::swr::Resampler;
 use super::volume::OutputShared;
 use super::{
     describe, Capture, CaptureState, DeviceList, Monitor, MonitorInit, MonitorState, OutputInfo,
-    SourceInfo, SourceKind, SystemEvent, DESKTOP,
+    SourceInfo, SourceKind, SystemEvent, DESKTOP, DESKTOP_NAME,
 };
 
 const OUTPUT_PREFIX: &str = "output:";
@@ -514,7 +514,7 @@ pub fn enumerate() -> Result<DeviceList, String> {
     let mut list = DeviceList::default();
     list.sources.push(SourceInfo {
         id: DESKTOP.into(),
-        name: "Desktop audio".into(),
+        name: DESKTOP_NAME.into(),
         kind: SourceKind::Desktop,
         is_default: false,
         // ScreenCaptureKit leaves this process out: no feedback possible.

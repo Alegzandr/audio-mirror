@@ -14,7 +14,7 @@ entry() {
   jq -n --arg url "$base/$file" --rawfile sig "$dir/$file.sig" '{url: $url, signature: $sig}'
 }
 
-win=$(entry "Audio-Mirror_${version}_windows_x64_portable.exe")
+win=$(entry "Audio-Mirror_${version}_windows_x64_setup.exe")
 linux=$(entry "Audio-Mirror_${version}_linux_x86_64.AppImage")
 mac=$(entry "Audio-Mirror_${version}_macos_universal.app.tar.gz")
 

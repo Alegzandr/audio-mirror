@@ -81,13 +81,13 @@ jobs:
           workspaces: src-tauri
       - run: npm ci
 
-      - name: Windows, portable executable
+      - name: Windows, self-installing executable
         if: matrix.name == 'windows'
         shell: bash
         run: |
           npx tauri build --no-bundle
           mkdir -p dist
-          out="dist/Audio-Mirror_${VERSION}_windows_x64_portable.exe"
+          out="dist/Audio-Mirror_${VERSION}_windows_x64_setup.exe"
           cp src-tauri/target/release/audio-mirror.exe "$out"
           npx tauri signer sign "$out"
 

@@ -1,5 +1,7 @@
 pub mod audio;
 pub mod config;
+#[cfg(windows)]
+mod install;
 mod tray;
 mod updater;
 
@@ -88,6 +90,7 @@ fn set_output_volume(
     id: String,
     name: String,
     fader: f32,
+    persist: bool,
 ) -> Result<(), String> {
     let fader = if fader.is_finite() {
         fader.clamp(0.0, 1.0)
@@ -95,9 +98,12 @@ fn set_output_volume(
         1.0
     };
     // Volume goes straight to the audio thread, the stream is not rebuilt.
+    // While the slider moves, only the final position is written to disk.
     let mut cfg = state.config.lock();
     cfg.output_mut(&id, &name).fader = fader;
-    state.save(&cfg)?;
+    if persist {
+        state.save(&cfg)?;
+    }
     state
         .engine
         .set_gain(&id, audio::volume::fader_to_gain(fader));
@@ -142,7 +148,9 @@ fn hide_panel(app: AppHandle) {
 
 #[tauri::command]
 fn restart(app: AppHandle) {
-    app.restart();
+    // Goes through RunEvent::Exit so the single-instance lock is released
+    // before the new process starts; `restart()` would skip it.
+    app.request_restart();
 }
 
 #[tauri::command]
@@ -150,11 +158,39 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Starts the tray, the audio and the panel, once the startup update check
+/// is done.
+pub(crate) fn start(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.engine.apply(state.config.lock().engine_config());
+
+    // An install moved the executable: point the login item at the new path.
+    let launcher = app.autolaunch();
+    if launcher.is_enabled().unwrap_or(false) {
+        let _ = launcher.enable();
+    }
+
+    if let Err(e) = tray::setup(app) {
+        log::error!("tray: {e}");
+    }
+    if !std::env::args().any(|a| a == AUTOSTART_ARG) {
+        tray::show_panel(app);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    if !install::prepare() {
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            tray::show_panel(app);
+            // During the startup update check, the splash is already showing.
+            if app.get_webview_window(updater::SPLASH).is_none() {
+                tray::show_panel(app);
+            }
         }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
@@ -165,35 +201,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Start at login is opt-in: the user turns it on in the panel.
             let path = config::config_path(app.path().app_config_dir()?);
-            let mut config = AppConfig::load(&path);
+            let config = AppConfig::load(&path);
 
-            // Starting with the system is the right default for a background
-            // utility; it is decided once, then left to the user.
-            if !config.onboarded {
-                if !cfg!(debug_assertions) {
-                    if let Err(e) = app.autolaunch().enable() {
-                        log::warn!("autostart: {e}");
-                    }
-                }
-                config.onboarded = true;
-                let _ = config.save(&path);
-            }
-
-            let engine = Engine::new();
-            engine.apply(config.engine_config());
             app.manage(AppState {
                 config: Mutex::new(config),
                 path,
-                engine,
+                engine: Engine::new(),
                 update_ready: Mutex::new(None),
             });
+            app.manage(updater::SplashState::default());
 
-            tray::setup(app)?;
-            if !std::env::args().any(|a| a == AUTOSTART_ARG) {
-                tray::show_panel(app.handle());
+            if updater::enabled() {
+                updater::launch(app.handle())?;
+            } else {
+                start(app.handle());
             }
-            updater::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -208,6 +232,7 @@ pub fn run() {
             hide_panel,
             restart,
             quit,
+            updater::update_progress,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start Audio Mirror")
