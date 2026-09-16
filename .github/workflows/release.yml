@@ -112,7 +112,7 @@ jobs:
           cp "$dir"/*.app.tar.gz.sig "$base.app.tar.gz.sig"
           ditto -c -k --keepParent "$dir/Audio Mirror.app" "$base.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-${{ matrix.name }}
           path: dist/*
@@ -127,7 +127,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           pattern: dist-*
           path: dist
