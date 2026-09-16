@@ -1,0 +1,50 @@
+# Product
+
+<!-- impeccable:product-schema 1 -->
+
+## Platform
+
+web
+
+## Stack
+
+Tauri 2 (Rust) with a build-free HTML/CSS/JS interface served from `ui/`. Delegated choice: no framework, the interface is a single tray panel.
+
+## Users
+
+Streamers and content creators on Windows, macOS or Linux. During a live stream or a recording session they want to hear the computer's sound in their headphones while also sending it to a virtual cable, a capture card or a second PC.
+
+## Product Purpose
+
+Audio Mirror takes one audio source (desktop audio, a loopback capture of a specific output, or an input device) and plays it on N output devices at once, each with its own volume. Success: set it once, it lives in the tray, starts with the system, and reconnects by itself when a device comes back.
+
+## Positioning
+
+Reproduces how OBS Studio monitors audio (shared mode, resampling to each output's native format, prefill, feedback-loop protection) without running OBS, and for several outputs at once.
+
+## Operating Context
+
+A tray icon. Left click unfolds a small panel above the taskbar (like OneDrive), right click offers Open and Quit. Opened briefly next to OBS, a game or a DAW: check the sound flows, adjust a volume, mute an output.
+
+## Capabilities and Constraints
+
+- One source at a time, N outputs, per-output volume (OBS logarithmic fader curve) and mute.
+- Minimum settings, maximum decisions made for the user: mirroring runs whenever an output is on; latency is fixed at 40 ms; updates are checked, downloaded and installed silently, the panel only offers a restart; start with system is enabled on first launch and can be turned off.
+- An output captured by the source can never be a destination.
+- Portable executables for Windows, Linux (AppImage) and macOS; updates from the latest GitHub release.
+- Desktop capture: macOS 14.6 or later, PulseAudio or PipeWire on Linux.
+- English only for now; more languages later. All code and comments in English.
+
+## Brand Commitments
+
+Name: Audio Mirror. Owner constraints: no subtitles, no Inter font, no Lucide or custom-drawn icons, no decorative color spots, no LED-style indicators, no em dash, no hover effect on anything that is not clickable, no heavy gradients, no neon purple style.
+
+## Evidence on Hand
+
+No testimonials, numbers or screenshots of real use. Do not invent any.
+
+## Product Principles
+
+- Sound first: each output's state reads at a glance, as text.
+- Decide for the user: fewer settings, sensible defaults, everything remembered.
+- Safe by default: no feedback loop possible, automatic reconnection.

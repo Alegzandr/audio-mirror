@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.key
+*.key.password
+.DS_Store
+.impeccable/review/
+.impeccable/direction-payload.json
+.impeccable/questions/

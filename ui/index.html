@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Audio Mirror</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="panel">
+    <header class="panel-head" id="head">
+      <h1>Audio Mirror</h1>
+      <span class="run-state" id="run-state" aria-live="polite"></span>
+    </header>
+
+    <main id="scroller">
+      <section class="group" aria-labelledby="source-title">
+        <h2 id="source-title">Source</h2>
+        <div class="list">
+          <div class="source">
+            <select id="source" class="select" aria-labelledby="source-title"></select>
+            <div class="level">
+              <div class="meter" role="meter" aria-label="Source level" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60" id="source-meter"><span></span></div>
+              <span class="db" id="source-db"></span>
+            </div>
+            <p class="error" id="source-error" hidden></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="group" aria-labelledby="outputs-title">
+        <h2 id="outputs-title">Outputs</h2>
+        <div class="list" id="outputs">
+          <p class="row empty">Looking for audio devices…</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="panel-foot">
+      <label class="check" for="autostart">
+        <input type="checkbox" class="switch" id="autostart">
+        <span>Start with system</span>
+      </label>
+      <div class="foot-actions">
+        <span class="version" id="version"></span>
+        <button type="button" class="btn btn-primary" id="restart" hidden>Restart to update</button>
+        <button type="button" class="btn btn-plain" id="quit">Quit</button>
+      </div>
+    </footer>
+  </div>
+
+  <template id="output-row">
+    <div class="row output">
+      <div class="output-head">
+        <input type="checkbox" class="switch output-enabled">
+        <label class="output-name"></label>
+        <span class="output-state"></span>
+      </div>
+      <div class="output-controls">
+        <div class="fader-stack">
+          <input type="range" class="fader" min="0" max="1000" step="1">
+          <div class="meter output-meter" role="meter" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60"><span></span></div>
+        </div>
+        <span class="db output-db"></span>
+        <button type="button" class="btn btn-toggle output-mute" aria-pressed="false">Mute</button>
+      </div>
+      <p class="output-detail"></p>
+    </div>
+  </template>
+</body>
+</html>

@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-16T00:00:00Z",
+  "title": "Design System: Audio Mirror",
+  "extensions": {
+    "colorMeta": {
+      "accent": { "role": "primary", "displayName": "Settings Blue", "canonical": "#1f5fbf", "darkToken": "accent-dark", "tonalRamp": ["#0b1f40", "#11306a", "#174290", "#1f5fbf", "#4d8fe8", "#80b0f0", "#b5d0f6", "#e3eefc"] },
+      "accent-hover": { "role": "primary", "displayName": "Settings Blue Pressed", "canonical": "#194f9f", "darkToken": "accent-hover-dark", "tonalRamp": ["#0b1f40", "#11306a", "#194f9f", "#1f5fbf", "#4d8fe8", "#6aa2ee", "#b5d0f6", "#e3eefc"] },
+      "accent-soft": { "role": "primary", "displayName": "Blue Wash", "canonical": "rgba(31, 95, 191, 0.12)", "darkToken": "accent-soft-dark" },
+      "accent-text": { "role": "primary", "displayName": "On Blue", "canonical": "#ffffff", "darkToken": "accent-text-dark" },
+      "danger": { "role": "error", "displayName": "Error Red", "canonical": "#b3261e", "darkToken": "danger-dark", "tonalRamp": ["#3d0c09", "#63140f", "#8a1c15", "#b3261e", "#d9483d", "#ff7b72", "#ffb3ad", "#ffe6e4"] },
+      "window": { "role": "neutral", "displayName": "Window Gray", "canonical": "#f3f3f2", "darkToken": "window-dark", "tonalRamp": ["#1b1b1d", "#262628", "#333336", "#4a4a4e", "#707075", "#a6a6ab", "#e2e2e0", "#f3f3f2"] },
+      "surface": { "role": "neutral", "displayName": "Raised White", "canonical": "#ffffff", "darkToken": "surface-dark" },
+      "surface-sunken": { "role": "neutral", "displayName": "Sunken Track", "canonical": "#e9e9e7", "darkToken": "surface-sunken-dark" },
+      "line": { "role": "neutral", "displayName": "Hairline", "canonical": "#e2e2e0", "darkToken": "line-dark" },
+      "line-strong": { "role": "neutral", "displayName": "Strong Hairline", "canonical": "#c9c9c6", "darkToken": "line-strong-dark" },
+      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "#1c1c1e", "darkToken": "ink-dark" },
+      "ink-secondary": { "role": "neutral", "displayName": "Secondary Ink", "canonical": "#5f5f63", "darkToken": "ink-secondary-dark" },
+      "ink-tertiary": { "role": "neutral", "displayName": "Tertiary Ink", "canonical": "#707075", "darkToken": "ink-tertiary-dark" },
+      "meter": { "role": "neutral", "displayName": "Meter Gray", "canonical": "#8a8a90", "darkToken": "meter-dark" },
+      "control": { "role": "neutral", "displayName": "Control Fill", "canonical": "#ffffff", "darkToken": "control-dark" },
+      "control-hover": { "role": "neutral", "displayName": "Control Hover", "canonical": "#f5f5f4", "darkToken": "control-hover-dark" },
+      "control-active": { "role": "neutral", "displayName": "Control Pressed", "canonical": "#ebebea", "darkToken": "control-active-dark" },
+      "knob": { "role": "neutral", "displayName": "Knob", "canonical": "#ffffff", "darkToken": "knob-dark" }
+    },
+    "typographyMeta": {
+      "title": { "displayName": "Title", "purpose": "The app name in the panel header, once." },
+      "group-heading": { "displayName": "Group heading", "purpose": "Source and Outputs headings above grouped lists." },
+      "body": { "displayName": "Body", "purpose": "Device names, state text, notes, dB values, footer text. Tabular numerals." },
+      "label": { "displayName": "Label", "purpose": "Button text; pressed toggles use 600." }
+    },
+    "shadows": [
+      { "name": "group-lift", "value": "0 1px 2px rgba(0,0,0,0.06), 0 1px 1px rgba(0,0,0,0.03)", "darkValue": "0 1px 2px rgba(0,0,0,0.3)", "purpose": "Grouped lists only." },
+      { "name": "knob", "value": "0 1px 2px rgba(0,0,0,0.25)", "purpose": "Switch knob." },
+      { "name": "thumb", "value": "0 1px 3px rgba(0,0,0,0.2)", "purpose": "Volume slider thumb." }
+    ],
+    "motion": [
+      { "name": "ease", "value": "cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "All state transitions." },
+      { "name": "duration-control", "value": "150ms", "purpose": "Button colors, thumb scale, header hairline." },
+      { "name": "duration-switch", "value": "200ms", "purpose": "Switch track color and knob slide." },
+      { "name": "reduced-motion", "value": "transition: none", "purpose": "All transitions removed under prefers-reduced-motion." }
+    ],
+    "breakpoints": [
+      { "name": "panel", "value": "380px x 560px fixed tray window" }
+    ],
+    "focus": { "value": "outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px", "purpose": "All focusable controls; pill radius on switches." }
+  },
+  "components": [
+    {
+      "name": "Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "Default text button, for secondary actions such as Forget.",
+      "html": "<button type=\"button\" class=\"ds-btn\">Forget</button>",
+      "css": ".ds-btn { font: 500 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; color: #1c1c1e; background: #ffffff; border: 1px solid #c9c9c6; border-radius: 6px; padding: 4px 12px; min-height: 28px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.16,1,0.3,1); } .ds-btn:hover { background: #f5f5f4; } .ds-btn:active { background: #ebebea; } .ds-btn:focus-visible { outline: 2px solid #1f5fbf; outline-offset: 2px; }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single primary action, such as Restart to update.",
+      "html": "<button type=\"button\" class=\"ds-btn-primary\">Restart to update</button>",
+      "css": ".ds-btn-primary { font: 500 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; color: #ffffff; background: #1f5fbf; border: 1px solid #1f5fbf; border-radius: 6px; padding: 4px 12px; min-height: 28px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.16,1,0.3,1), border-color 150ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-primary:hover { background: #194f9f; border-color: #194f9f; } .ds-btn-primary:focus-visible { outline: 2px solid #1f5fbf; outline-offset: 2px; }"
+    },
+    {
+      "name": "Plain Button",
+      "kind": "button",
+      "refersTo": "button-plain",
+      "description": "Borderless text button for low-emphasis actions such as Quit.",
+      "html": "<button type=\"button\" class=\"ds-btn-plain\">Quit</button>",
+      "css": ".ds-btn-plain { font: 500 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; color: #5f5f63; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px; min-height: 28px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.16,1,0.3,1), color 150ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-plain:hover { background: #ebebea; color: #1c1c1e; } .ds-btn-plain:focus-visible { outline: 2px solid #1f5fbf; outline-offset: 2px; }"
+    },
+    {
+      "name": "Mute Toggle",
+      "kind": "button",
+      "refersTo": "button-toggle-pressed",
+      "description": "Per-output mute; pressed state reads Muted on a blue wash.",
+      "html": "<button type=\"button\" class=\"ds-btn-toggle\" aria-pressed=\"false\">Mute</button> <button type=\"button\" class=\"ds-btn-toggle\" aria-pressed=\"true\">Muted</button>",
+      "css": ".ds-btn-toggle { font: 500 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; color: #1c1c1e; background: #ffffff; border: 1px solid #c9c9c6; border-radius: 6px; padding: 4px 12px; min-height: 28px; min-width: 68px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-toggle:hover { background: #f5f5f4; } .ds-btn-toggle[aria-pressed=\"true\"] { background: rgba(31,95,191,0.12); border-color: transparent; color: #1f5fbf; font-weight: 600; } .ds-btn-toggle[aria-pressed=\"true\"]:hover { filter: brightness(0.97); } .ds-btn-toggle:focus-visible { outline: 2px solid #1f5fbf; outline-offset: 2px; }"
+    },
+    {
+      "name": "Select",
+      "kind": "input",
+      "refersTo": "select",
+      "description": "Native select for choosing the source.",
+      "html": "<select class=\"ds-select\"><option>Desktop audio (default)</option><option>Microphone</option></select>",
+      "css": ".ds-select { width: 100%; font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; color: #1c1c1e; background-color: #ffffff; border: 1px solid #c9c9c6; border-radius: 6px; padding: 5px 8px; min-height: 30px; cursor: pointer; } .ds-select:hover { background-color: #f5f5f4; } .ds-select:focus-visible { outline: 2px solid #1f5fbf; outline-offset: 2px; }"
+    },
+    {
+      "name": "Switch",
+      "kind": "input",
+      "refersTo": "switch",
+      "description": "On/off for outputs and Start with system.",
+      "html": "<label class=\"ds-check\"><input type=\"checkbox\" class=\"ds-switch\" checked><span>Start with system</span></label>",
+      "css": ".ds-check { display: inline-flex; align-items: center; gap: 10px; font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; color: #1c1c1e; cursor: pointer; } .ds-switch { appearance: none; position: relative; width: 36px; height: 20px; margin: 0; border-radius: 20px; background: #c9c9c6; cursor: pointer; transition: background-color 200ms cubic-bezier(0.16,1,0.3,1); } .ds-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.25); transition: transform 200ms cubic-bezier(0.16,1,0.3,1); } .ds-switch:checked { background: #1f5fbf; } .ds-switch:checked::after { transform: translateX(16px); } .ds-switch:hover { filter: brightness(0.96); } .ds-switch:focus-visible { outline: 2px solid #1f5fbf; outline-offset: 2px; border-radius: 20px; }"
+    },
+    {
+      "name": "Output Row",
+      "kind": "card",
+      "refersTo": "grouped-list",
+      "description": "Grouped list with an output row: switch, name, state text, slider with thin meter, dB value, Mute.",
+      "html": "<div class=\"ds-list\"><div class=\"ds-row\"><div class=\"ds-head\"><input type=\"checkbox\" class=\"ds-sw\" checked><span class=\"ds-name\">Headphones (default)</span><span class=\"ds-state\">Playing</span></div><div class=\"ds-controls\"><div class=\"ds-stack\"><input type=\"range\" class=\"ds-fader\" value=\"70\" style=\"--fill:70%\"><div class=\"ds-meter\"><span style=\"transform:scaleX(0.55)\"></span></div></div><span class=\"ds-db\">−6.2 dB</span><button type=\"button\" class=\"ds-mute\">Mute</button></div></div><div class=\"ds-row\"><div class=\"ds-head\"><input type=\"checkbox\" class=\"ds-sw\"><span class=\"ds-name\">Virtual Cable</span><span class=\"ds-state\">Off</span></div></div></div>",
+      "css": ".ds-list { width: 348px; background: #ffffff; border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 1px 1px rgba(0,0,0,0.03); overflow: hidden; font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; font-variant-numeric: tabular-nums; color: #1c1c1e; } .ds-row { display: grid; gap: 8px; padding: 12px 14px; } .ds-row + .ds-row { border-top: 1px solid #e2e2e0; } .ds-head { display: flex; align-items: center; gap: 10px; } .ds-sw { appearance: none; position: relative; width: 36px; height: 20px; margin: 0; border-radius: 20px; background: #c9c9c6; cursor: pointer; } .ds-sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.25); } .ds-sw:checked { background: #1f5fbf; } .ds-sw:checked::after { transform: translateX(16px); } .ds-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-state { color: #5f5f63; } .ds-controls { display: flex; align-items: center; gap: 10px; padding-left: 46px; } .ds-stack { flex: 1; min-width: 0; display: grid; gap: 3px; padding-top: 5px; } .ds-fader { appearance: none; width: 100%; height: 18px; margin: 0; background: transparent; cursor: pointer; } .ds-fader::-webkit-slider-runnable-track { height: 4px; border-radius: 4px; background: linear-gradient(to right, #1f5fbf var(--fill), #c9c9c6 var(--fill)); } .ds-fader::-webkit-slider-thumb { appearance: none; width: 18px; height: 18px; margin-top: -7px; border-radius: 50%; background: #fff; border: 1px solid #c9c9c6; box-shadow: 0 1px 3px rgba(0,0,0,0.2); transition: transform 150ms cubic-bezier(0.16,1,0.3,1); } .ds-fader:hover::-webkit-slider-thumb { transform: scale(1.08); } .ds-meter { position: relative; height: 2px; margin: 0 9px; border-radius: 2px; background: #e9e9e7; overflow: hidden; } .ds-meter span { position: absolute; inset: 0; background: #8a8a90; transform-origin: left center; } .ds-db { width: 8ch; text-align: right; color: #5f5f63; } .ds-mute { font: inherit; font-weight: 500; color: #1c1c1e; background: #fff; border: 1px solid #c9c9c6; border-radius: 6px; padding: 4px 12px; min-height: 28px; min-width: 68px; cursor: pointer; } .ds-mute:hover { background: #f5f5f4; } .ds-mute:focus-visible, .ds-sw:focus-visible, .ds-fader:focus-visible { outline: 2px solid #1f5fbf; outline-offset: 2px; }"
+    },
+    {
+      "name": "Level Meter",
+      "kind": "custom",
+      "refersTo": "level-meter",
+      "description": "Thin gray source level bar with a dB readout.",
+      "html": "<div class=\"ds-level\"><div class=\"ds-lm\"><span style=\"transform:scaleX(0.62)\"></span></div><span class=\"ds-lm-db\">−12.4 dB</span></div>",
+      "css": ".ds-level { display: flex; align-items: center; gap: 10px; width: 320px; font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; font-variant-numeric: tabular-nums; } .ds-lm { position: relative; flex: 1; height: 2px; border-radius: 2px; background: #e9e9e7; overflow: hidden; } .ds-lm span { position: absolute; inset: 0; background: #8a8a90; transform-origin: left center; } .ds-lm-db { width: 8ch; text-align: right; color: #5f5f63; }"
+    },
+    {
+      "name": "Panel Header",
+      "kind": "nav",
+      "refersTo": "list-row",
+      "description": "App title with a run-state sentence; no icons, no subtitle.",
+      "html": "<header class=\"ds-head-bar\"><h1 class=\"ds-title\">Audio Mirror</h1><span class=\"ds-run\">Playing to 2 outputs</span></header>",
+      "css": ".ds-head-bar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 380px; padding: 16px 16px 12px; background: #f3f3f2; border-bottom: 1px solid #e2e2e0; font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; } .ds-title { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; color: #1c1c1e; } .ds-run { color: #1c1c1e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Settings Pane",
+    "overview": "Audio Mirror is drawn as a system settings panel played straight, finished to the level of macOS Settings and Windows 11 Settings. It is a 380 by 560 tray panel: a fixed header with the app name and a plain run-state sentence, a scrolling middle made of titled groups, and a fixed footer. Everything a user needs to know (what is the source, how loud is it, which outputs play, at what volume) is written as text or drawn as a thin neutral bar. The window should look like it shipped with the OS.\n\nDensity is that of a native pane: 13px system text, 44px minimum rows, hairline separators inside softly raised grouped lists. Neutrals follow the OS light or dark theme through `prefers-color-scheme`. One sober blue does all the work color is allowed to do: the primary action, checked switches, the pressed Mute toggle, slider fill, and focus. One red marks errors. The world refuses the dark LED mixer look, segmented or colored meters, decorative cards, and icons of any kind.",
+    "keyCharacteristics": [
+      "System font stack only, one size for almost everything, weight carries hierarchy.",
+      "Grouped rows on a slightly raised white (or dark gray) surface, separated by 1px hairlines.",
+      "Native control vocabulary: switches, range sliders, a native select, text buttons.",
+      "State is text (\"Playing\", \"Muted\", \"Not connected\"), never a lamp.",
+      "One blue accent, one error red, everything else neutral and theme-following."
+    ],
+    "rules": [
+      { "name": "The One Blue Rule", "body": "Blue appears only on something the user can act on or has turned on: primary action, checked state, slider fill, focus. Never on headings, meters, or decoration.", "section": "colors" },
+      { "name": "The Gray Meter Rule", "body": "Level meters are gray at every level. No green-to-red ramps, no segments, no peak lamps; loudness is read from bar length and the dB number beside it.", "section": "colors" },
+      { "name": "The Words For State Rule", "body": "Run and output state are sentences in ink, secondary ink, or error red. No colored dots, badges, or LED-style indicators.", "section": "colors" },
+      { "name": "The One Size Rule", "body": "Everything except the app title is 13px. Hierarchy comes from weight (400/500/600) and ink level, not size.", "section": "typography" },
+      { "name": "The No Eyebrow Rule", "body": "A group has a heading and nothing else above its list: no subtitle, no eyebrow, no description line.", "section": "typography" },
+      { "name": "The Single Lift Rule", "body": "Only grouped lists are raised. Rows, buttons, and headers stay on their surface.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do use the system font stack at 13px for everything but the app title.",
+      "Do put related settings in a grouped list with hairline separators and a plain group heading above it.",
+      "Do write every state as text, and use Error Red only for error text.",
+      "Do keep meters as 2px gray bars with a dB number beside them.",
+      "Do follow the OS theme for all neutrals, using each token's `-dark` counterpart.",
+      "Do keep all UI copy in English."
+    ],
+    "donts": [
+      "Don't use icons of any kind, including Lucide or custom-drawn ones.",
+      "Don't use Inter or any web font.",
+      "Don't build LED-style indicators, segmented or colored meters, or a dark mixer look.",
+      "Don't add subtitles or eyebrows above or below headings.",
+      "Don't add decorative color spots, heavy gradients, or neon purple styling.",
+      "Don't add hover effects to anything that is not clickable.",
+      "Don't use a second accent color, or blue on non-interactive elements.",
+      "Don't add decorative cards; the grouped list is the only container.",
+      "Don't write an em dash in UI copy."
+    ]
+  }
+}

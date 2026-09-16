@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Vérifier le tag
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: v
+        name: Tag, version et branche
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          cargo_version=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d '"' -f2)
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::Le tag $tag ne correspond pas à la version $cargo_version de Cargo.toml"
+            exit 1
+          fi
+          if ! git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main$'; then
+            echo "::error::Le tag $tag doit pointer sur un commit de main"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  tests:
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: [verify, tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+          - name: linux
+            os: ubuntu-22.04
+          - name: macos
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Dépendances système
+        if: runner.os == 'Linux'
+        run: ./scripts/linux-deps.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+
+      - name: Windows, exécutable portable
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          npx tauri build --no-bundle
+          mkdir -p dist
+          out="dist/Audio-Mirror_${VERSION}_windows_x64_portable.exe"
+          cp src-tauri/target/release/audio-mirror.exe "$out"
+          npx tauri signer sign "$out"
+
+      - name: Linux, AppImage
+        if: matrix.name == 'linux'
+        run: |
+          npx tauri build --bundles appimage
+          mkdir -p dist
+          dir=src-tauri/target/release/bundle/appimage
+          out="dist/Audio-Mirror_${VERSION}_linux_x86_64.AppImage"
+          cp "$dir"/*.AppImage "$out"
+          cp "$dir"/*.AppImage.sig "$out.sig"
+
+      - name: macOS, app universelle
+        if: matrix.name == 'macos'
+        run: |
+          npx tauri build --target universal-apple-darwin --bundles app
+          mkdir -p dist
+          dir=src-tauri/target/universal-apple-darwin/release/bundle/macos
+          base="dist/Audio-Mirror_${VERSION}_macos_universal"
+          cp "$dir"/*.app.tar.gz "$base.app.tar.gz"
+          cp "$dir"/*.app.tar.gz.sig "$base.app.tar.gz.sig"
+          ditto -c -k --keepParent "$dir/Audio Mirror.app" "$base.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publier la release
+    needs: [verify, build]
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Manifeste de mise à jour
+        run: ./scripts/latest-json.sh dist "$VERSION" "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" > dist/latest.json
+      - name: Release GitHub
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Audio Mirror $VERSION" \
+            --generate-notes \
+            --verify-tag \
+            dist/*
