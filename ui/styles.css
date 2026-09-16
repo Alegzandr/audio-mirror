@@ -270,6 +270,7 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  white-space: nowrap;
   cursor: pointer;
 }
 

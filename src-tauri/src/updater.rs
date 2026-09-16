@@ -172,10 +172,26 @@ async fn check_and_install(app: &AppHandle, splash: bool) -> Result<Option<Strin
 }
 
 #[cfg(windows)]
-fn install(update: &Update, bytes: &[u8]) -> Result<(), String> {
-    let tmp = std::env::temp_dir().join(format!("audio-mirror-{}.exe", update.version));
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    let result = self_replace::self_replace(&tmp).map_err(|e| e.to_string());
+fn install(_update: &Update, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    // The verified bytes are staged next to the executable, in a file this
+    // process creates itself, so nothing can swap them before the replace.
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe.parent().ok_or("no install folder")?;
+    let tmp = dir.join(format!("audio-mirror.update-{}.exe", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(bytes)?;
+            f.sync_all()
+        });
+    let result = written
+        .map_err(|e| e.to_string())
+        .and_then(|()| self_replace::self_replace(&tmp).map_err(|e| e.to_string()));
     let _ = std::fs::remove_file(&tmp);
     result
 }

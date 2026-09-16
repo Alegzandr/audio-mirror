@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>Audio Mirror</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="i18n.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -17,12 +18,12 @@
 
     <main id="scroller">
       <section class="group" aria-labelledby="source-title">
-        <h2 id="source-title">Source</h2>
+        <h2 id="source-title" data-i18n="source.title">Source</h2>
         <div class="list">
           <div class="source">
             <select id="source" class="select" aria-labelledby="source-title"></select>
             <div class="level">
-              <div class="meter" role="meter" aria-label="Source level" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60" id="source-meter"><span></span></div>
+              <div class="meter" role="meter" aria-label="Source level" data-i18n-aria-label="source.level" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60" id="source-meter"><span></span></div>
               <span class="db" id="source-db"></span>
             </div>
             <p class="error" id="source-error" hidden></p>
@@ -31,9 +32,9 @@
       </section>
 
       <section class="group" aria-labelledby="outputs-title">
-        <h2 id="outputs-title">Outputs</h2>
+        <h2 id="outputs-title" data-i18n="outputs.title">Outputs</h2>
         <div class="list" id="outputs">
-          <p class="row empty">Looking for audio devices…</p>
+          <p class="row empty" data-i18n="outputs.searching">Looking for audio devices…</p>
         </div>
       </section>
     </main>
@@ -41,12 +42,12 @@
     <footer class="panel-foot">
       <label class="check" for="autostart">
         <input type="checkbox" class="switch" id="autostart">
-        <span>Start with system</span>
+        <span data-i18n="autostart">Start with system</span>
       </label>
       <div class="foot-actions">
         <span class="version" id="version"></span>
-        <button type="button" class="btn btn-primary" id="restart" hidden>Restart to update</button>
-        <button type="button" class="btn btn-plain" id="quit">Quit</button>
+        <button type="button" class="btn btn-primary" id="restart" data-i18n="update.restart" hidden>Restart to update</button>
+        <button type="button" class="btn btn-plain" id="quit" data-i18n="quit">Quit</button>
       </div>
     </footer>
   </div>
@@ -64,7 +65,7 @@
           <div class="meter output-meter" role="meter" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60"><span></span></div>
         </div>
         <span class="db output-db"></span>
-        <button type="button" class="btn btn-toggle output-mute" aria-pressed="false">Mute</button>
+        <button type="button" class="btn btn-toggle output-mute" aria-pressed="false" data-i18n="output.mute">Mute</button>
       </div>
       <p class="output-detail"></p>
     </div>

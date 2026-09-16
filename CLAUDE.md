@@ -25,7 +25,7 @@ CI (`.github/workflows/ci.yml`) also requires:
 ```sh
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
-npm run check:ui                              # node --check ui/app.js and ui/splash.js
+npm run check:ui                              # tsc --checkJs over ui/ (no emit)
 ```
 
 Platform modules are `cfg`-gated, so local clippy/tests only cover the host OS; CI runs tests on Windows, macOS and Linux.
@@ -41,9 +41,10 @@ The UI can be previewed without Tauri by opening `ui/index.html` in a browser: `
 - `audio/swr.rs`: FFI wrapper over libswresample with OBS's settings and mono upmix matrix; each monitor resamples to its device format.
 - Platform backends, selected at compile time as `platform` in `audio/mod.rs`, each providing enumeration, capture, monitoring and `watch_system`: `wasapi.rs` (Windows), `coreaudio.rs` (macOS, ScreenCaptureKit + AUHAL + AudioQueue), `pulse.rs` (Linux, libpulse). A monitor for the device the source captures returns `MonitorInit::Ignored` (OBS's `DO_NOT_SELF_MONITOR`).
 - `tray.rs`: tray icon, panel positioning near the tray, menu (Open, Restart audio, Quit).
+- `i18n.rs`: interface language (English, French), detected once from the system locale with `sys-locale`. Holds the tray menu strings and injects `window.__AUDIO_MIRROR_LANG__` into every webview. Page strings live in `ui/i18n.js` (loaded before `app.js`/`splash.js`, exposes `window.I18n`; static markup uses `data-i18n` / `data-i18n-<attr>`), which also translates the engine's English status messages at display time; engine code keeps its OBS-matching English strings. Every user-visible string goes through `t()` with the same keys in each language; preview another language with `ui/index.html?lang=fr`.
 - `updater.rs`: Discord-style updates from the latest GitHub release. In release builds, setup opens the `splash` window (`ui/splash.html`, polls `update_progress`), installs a newer version and restarts, or closes the splash and calls `lib::start` (engine, tray, panel). While running it re-checks every 6 h and the panel offers a restart. Debug builds skip all of this.
 - `install.rs` (Windows only): runs before Tauri. A release exe started outside `%LOCALAPPDATA%\AudioMirror` copies itself there, registers the Start menu shortcut and the Installed apps entry, relaunches and exits; `--uninstall` removes everything but the settings.
-- `ui/`: build-free HTML/CSS/JS panel (no framework, no bundler), served directly by Tauri.
+- `ui/`: build-free HTML/CSS/JS panel (no framework, no bundler), served directly by Tauri. The JS is type-checked, not compiled: JSDoc annotations plus `ui/types.d.ts`, which mirrors the Rust `Serialize` payloads and command signatures (`Commands`). Update it when a command or payload changes; the `demoInvoke` handlers are typed against it.
 
 ## Branches and releases
 
