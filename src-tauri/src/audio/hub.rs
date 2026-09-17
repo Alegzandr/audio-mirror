@@ -30,10 +30,16 @@ struct ProcessState {
     storage: [Vec<f32>; OBS_CHANNELS],
 }
 
+/// `audio_cb_list`. Behind an `Arc` so the capture thread can take the list
+/// and call the monitors without holding the lock: one device blocking in
+/// `on_audio` then holds up neither the other outputs nor a monitor being
+/// added or removed.
+type Callbacks = Arc<Vec<(CallbackId, Arc<dyn AudioCallback>)>>;
+
 pub struct SourceHub {
     process: Mutex<ProcessState>,
-    /// `audio_cb_list`, guarded like `audio_cb_mutex`.
-    callbacks: Mutex<Vec<(CallbackId, Arc<dyn AudioCallback>)>>,
+    /// Guarded like `audio_cb_mutex`.
+    callbacks: Mutex<Callbacks>,
     next_id: Mutex<CallbackId>,
     /// Peak of the converted audio since the last read, for the UI.
     peak: AtomicU32,
@@ -54,7 +60,7 @@ impl SourceHub {
                 audio_failed: false,
                 storage: [Vec::new(), Vec::new()],
             }),
-            callbacks: Mutex::new(Vec::new()),
+            callbacks: Mutex::new(Callbacks::default()),
             next_id: Mutex::new(1),
             peak: AtomicU32::new(0f32.to_bits()),
         }
@@ -68,13 +74,13 @@ impl SourceHub {
             *next += 1;
             id
         };
-        self.callbacks.lock().push((id, cb));
+        Arc::make_mut(&mut self.callbacks.lock()).push((id, cb));
         id
     }
 
     /// `obs_source_remove_audio_capture_callback`.
     pub fn remove_callback(&self, id: CallbackId) {
-        self.callbacks.lock().retain(|(i, _)| *i != id);
+        Arc::make_mut(&mut self.callbacks.lock()).retain(|(i, _)| *i != id);
     }
 
     pub fn take_peak(&self) -> f32 {
@@ -103,8 +109,10 @@ impl SourceHub {
             planes,
             frames: frames as u32,
         };
-        // `source_signal_audio_data`: newest callback first, under the lock.
-        let callbacks = self.callbacks.lock();
+        // `source_signal_audio_data`: newest callback first. A monitor
+        // removed while a packet is on its way still receives it, and its
+        // last `Arc` is released here rather than in the supervisor.
+        let callbacks = self.callbacks.lock().clone();
         for (_, cb) in callbacks.iter().rev() {
             cb.on_audio(&data);
         }

@@ -37,6 +37,7 @@ use super::format::{
     AudioSpec, ObsAudio, SampleFormat, SourceAudio, Speakers, OBS_SAMPLE_RATE, OBS_SPEAKERS,
 };
 use super::hub::{AudioCallback, SourceHub};
+use super::message::{self as msg, Kind, Message};
 use super::swr::Resampler;
 use super::volume::OutputShared;
 use super::{
@@ -190,8 +191,8 @@ fn list_devices(en: &IMMDeviceEnumerator, flow: EDataFlow) -> Vec<(String, Strin
     out
 }
 
-pub fn enumerate() -> Result<DeviceList, String> {
-    let en = enumerator().map_err(|e| e.message())?;
+pub fn enumerate() -> Result<DeviceList, Message> {
+    let en = enumerator().map_err(|e| msg::SYSTEM.detail(e.message()))?;
     let default_out = default_output_id();
     // SAFETY: COM call.
     let default_in = unsafe { en.GetDefaultAudioEndpoint(eCapture, eConsole) }
@@ -243,7 +244,7 @@ enum SourceType {
 }
 
 impl SourceType {
-    fn parse(source: &str) -> Result<SourceType, String> {
+    fn parse(source: &str) -> Result<SourceType, Message> {
         if source == DESKTOP {
             Ok(SourceType::DefaultOutput)
         } else if let Some(id) = source.strip_prefix(OUTPUT_PREFIX) {
@@ -251,7 +252,7 @@ impl SourceType {
         } else if let Some(id) = source.strip_prefix(INPUT_PREFIX) {
             Ok(SourceType::Input(id.to_string()))
         } else {
-            Err(format!("Unknown source {source}"))
+            Err(msg::UNKNOWN_SOURCE.detail(source))
         }
     }
 
@@ -323,8 +324,8 @@ impl Drop for MixFormat {
     }
 }
 
-fn hr(context: &str, e: windows::core::Error) -> String {
-    format!("{context}: {:08X}", e.code().0)
+fn hr(context: Kind, e: windows::core::Error) -> Message {
+    context.detail(format!("{:08X}", e.code().0))
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +354,7 @@ pub struct WasapiCapture {
     thread: Option<JoinHandle<()>>,
 }
 
-pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     let source_type = SourceType::parse(source)?;
     let stop = Arc::new(Event::new(true));
     let restart = Arc::new(Event::new(true));
@@ -369,7 +370,7 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
         std::thread::Builder::new()
             .name("win-wasapi: capture thread".into())
             .spawn(move || capture_thread(source_type, hub, &stop, &restart, &state))
-            .map_err(|e| e.to_string())?
+            .map_err(|e| msg::SYSTEM.detail(e))?
     };
 
     Ok(Box::new(WasapiCapture {
@@ -445,7 +446,7 @@ fn capture_thread(
                     } else if ret.0 == WAIT_OBJECT_0.0 + 1 || ret == WAIT_TIMEOUT {
                         if !process_capture_data(&mut active, &hub) {
                             log::info!("Device invalidated. Retrying");
-                            *state.lock() = CaptureState::Retrying("Device disconnected".into());
+                            *state.lock() = CaptureState::Retrying(msg::DEVICE_DISCONNECTED.into());
                             break;
                         }
                     } else {
@@ -487,25 +488,25 @@ fn capture_thread(
 }
 
 /// `WASAPISource::Initialize` for device sources.
-fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<ActiveCapture, String> {
-    let en = enumerator().map_err(|e| hr("Failed to create enumerator", e))?;
+fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<ActiveCapture, Message> {
+    let en = enumerator().map_err(|e| hr(msg::WASAPI_ENUMERATOR, e))?;
     // SAFETY: COM calls on valid objects throughout.
     unsafe {
         let device = match source_type {
             SourceType::DefaultOutput => en
                 .GetDefaultAudioEndpoint(eRender, eConsole)
-                .map_err(|e| hr("Failed GetDefaultAudioEndpoint", e))?,
+                .map_err(|e| hr(msg::WASAPI_DEFAULT_ENDPOINT, e))?,
             SourceType::DeviceOutput(id) | SourceType::Input(id) => en
                 .GetDevice(&HSTRING::from(id.as_str()))
-                .map_err(|e| hr("Failed to enumerate device", e))?,
+                .map_err(|e| hr(msg::WASAPI_ENUMERATE_DEVICE, e))?,
         };
 
         receive.reset();
 
         let client: IAudioClient = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| hr("Failed to activate client context", e))?;
-        let mix = MixFormat::get(&client).map_err(|e| hr("Failed to get mix format", e))?;
+            .map_err(|e| hr(msg::WASAPI_ACTIVATE_CLIENT, e))?;
+        let mix = MixFormat::get(&client).map_err(|e| hr(msg::WASAPI_MIX_FORMAT, e))?;
 
         // `InitFormat`: WASAPI is always float.
         let spec = AudioSpec {
@@ -527,7 +528,7 @@ fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<Activ
                 mix.0,
                 None,
             )
-            .map_err(|e| hr("Failed to initialize audio client", e))?;
+            .map_err(|e| hr(msg::WASAPI_INITIALIZE, e))?;
 
         if !source_type.is_input() {
             clear_buffer(&device)?;
@@ -535,13 +536,13 @@ fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<Activ
 
         let capture: IAudioCaptureClient = client
             .GetService()
-            .map_err(|e| hr("Failed to create capture context", e))?;
+            .map_err(|e| hr(msg::WASAPI_CAPTURE_CLIENT, e))?;
         client
             .SetEventHandle(receive.0)
-            .map_err(|e| hr("Failed to set event handle", e))?;
+            .map_err(|e| hr(msg::WASAPI_EVENT_HANDLE, e))?;
         client
             .Start()
-            .map_err(|e| hr("Failed to start capture client", e))?;
+            .map_err(|e| hr(msg::WASAPI_START_CAPTURE, e))?;
 
         log::info!(
             "WASAPI: Device '{}' [{} Hz] initialized",
@@ -559,13 +560,13 @@ fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<Activ
 }
 
 /// `WASAPISource::ClearBuffer`, the "silent loopback fix".
-fn clear_buffer(device: &IMMDevice) -> Result<(), String> {
+fn clear_buffer(device: &IMMDevice) -> Result<(), Message> {
     // SAFETY: COM calls on valid objects.
     unsafe {
         let client: IAudioClient = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| hr("Failed to activate client context", e))?;
-        let mix = MixFormat::get(&client).map_err(|e| hr("Failed to get mix format", e))?;
+            .map_err(|e| hr(msg::WASAPI_ACTIVATE_CLIENT, e))?;
+        let mix = MixFormat::get(&client).map_err(|e| hr(msg::WASAPI_MIX_FORMAT, e))?;
         client
             .Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -575,16 +576,16 @@ fn clear_buffer(device: &IMMDevice) -> Result<(), String> {
                 mix.0,
                 None,
             )
-            .map_err(|e| hr("Failed to initialize audio client", e))?;
+            .map_err(|e| hr(msg::WASAPI_INITIALIZE, e))?;
         let frames = client
             .GetBufferSize()
-            .map_err(|e| hr("Failed to get buffer size", e))?;
+            .map_err(|e| hr(msg::WASAPI_BUFFER_SIZE, e))?;
         let render: IAudioRenderClient = client
             .GetService()
-            .map_err(|e| hr("Failed to get render client", e))?;
+            .map_err(|e| hr(msg::WASAPI_RENDER_CLIENT, e))?;
         let buffer = render
             .GetBuffer(frames)
-            .map_err(|e| hr("Failed to get buffer", e))?;
+            .map_err(|e| hr(msg::WASAPI_GET_BUFFER, e))?;
         std::ptr::write_bytes(buffer, 0, frames as usize * mix.wfex().nBlockAlign as usize);
         let _ = render.ReleaseBuffer(frames, 0);
     }
@@ -677,7 +678,7 @@ pub fn create_monitor(
     source: &str,
     device: &str,
     shared: Arc<OutputShared>,
-) -> Result<MonitorInit, String> {
+) -> Result<MonitorInit, Message> {
     if captured_output(source).as_deref() == Some(device) {
         return Ok(MonitorInit::Ignored);
     }
@@ -692,17 +693,17 @@ pub fn create_monitor(
 }
 
 /// `audio_monitor_init_wasapi`.
-fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
-    let en = enumerator().map_err(|e| hr("Failed to create IMMDeviceEnumerator", e))?;
+fn init_monitor_client(device_id: &str) -> Result<MonitorClient, Message> {
+    let en = enumerator().map_err(|e| hr(msg::WASAPI_MONITOR_ENUMERATOR, e))?;
     // SAFETY: COM calls on valid objects.
     unsafe {
         let device = en
             .GetDevice(&HSTRING::from(device_id))
-            .map_err(|e| hr("Failed to get device", e))?;
+            .map_err(|e| hr(msg::WASAPI_GET_DEVICE, e))?;
         let client: IAudioClient = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| hr("Failed to activate device", e))?;
-        let mix = MixFormat::get(&client).map_err(|e| hr("Failed to get mix format", e))?;
+            .map_err(|e| hr(msg::WASAPI_ACTIVATE, e))?;
+        let mix = MixFormat::get(&client).map_err(|e| hr(msg::WASAPI_MIX_FORMAT, e))?;
         client
             .Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -712,7 +713,7 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
                 mix.0,
                 None,
             )
-            .map_err(|e| hr("Failed to initialize", e))?;
+            .map_err(|e| hr(msg::WASAPI_MONITOR_INITIALIZE, e))?;
 
         let channels = mix.wfex().nChannels as usize;
         let from = AudioSpec {
@@ -725,16 +726,17 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
             speakers: monitor_speakers(mix.channel_mask(), channels),
             format: SampleFormat::Float,
         };
-        let resampler =
-            Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
+        let resampler = Resampler::new(to, from).ok_or(msg::RESAMPLER)?;
 
         let buffer_frames = client
             .GetBufferSize()
-            .map_err(|e| hr("Failed to get buffer size", e))?;
+            .map_err(|e| hr(msg::WASAPI_BUFFER_SIZE, e))?;
         let render: IAudioRenderClient = client
             .GetService()
-            .map_err(|e| hr("Failed to get IAudioRenderClient", e))?;
-        client.Start().map_err(|e| hr("Failed to start audio", e))?;
+            .map_err(|e| hr(msg::WASAPI_MONITOR_RENDER_CLIENT, e))?;
+        client
+            .Start()
+            .map_err(|e| hr(msg::WASAPI_START_RENDER, e))?;
 
         Ok(MonitorClient {
             client: Com(client),
@@ -756,7 +758,7 @@ impl WasapiMonitor {
     /// between the captured device and the played one ends up as a glitch
     /// nobody can account for afterwards. Logging every packet would fill
     /// the file at packet rate, so only the transition is written.
-    fn fail(&self, reason: String) {
+    fn fail(&self, reason: Message) {
         let mut state = self.state.lock();
         if matches!(*state, MonitorState::Playing { .. }) {
             log::warn!("monitor {}: {reason}, reopening", self.device_id);
@@ -794,7 +796,7 @@ impl AudioCallback for WasapiMonitor {
         if !ok {
             // `audio_monitor_free_for_reconnect`.
             *playback = None;
-            self.fail("Device unavailable".into());
+            self.fail(msg::DEVICE_UNAVAILABLE.into());
         }
     }
 }

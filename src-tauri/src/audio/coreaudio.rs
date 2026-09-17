@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -38,6 +38,7 @@ use super::format::{
     OBS_SAMPLE_RATE, OBS_SPEAKERS,
 };
 use super::hub::{AudioCallback, SourceHub};
+use super::message::{self as msg, Message};
 use super::swr::Resampler;
 use super::volume::OutputShared;
 use super::{
@@ -47,6 +48,12 @@ use super::{
 
 const OUTPUT_PREFIX: &str = "output:";
 const INPUT_PREFIX: &str = "input:";
+
+/// Largest backlog a monitor keeps, past the three 30 ms queue buffers.
+/// Beyond it the device is not taking what the source produces (two clocks
+/// apart, or a device gone to sleep), and keeping the audio would only
+/// raise the latency for good.
+const MAX_BACKLOG_MS: usize = 400;
 
 // ---------------------------------------------------------------------------
 // C API (CoreFoundation, CoreAudio, AudioToolbox, CoreMedia, CoreGraphics)
@@ -530,7 +537,7 @@ fn device_is_input(name: &str) -> bool {
 
 pub fn init_thread() {}
 
-pub fn enumerate() -> Result<DeviceList, String> {
+pub fn enumerate() -> Result<DeviceList, Message> {
     let default_out = default_device(kAudioHardwarePropertyDefaultOutputDevice);
     let default_in = default_device(kAudioHardwarePropertyDefaultInputDevice);
 
@@ -699,7 +706,7 @@ define_class!(
     unsafe impl SCStreamDelegate for ScreenCaptureDelegate {
         #[unsafe(method(stream:didStopWithError:))]
         fn did_stop(&self, _stream: &SCStream, error: &NSError) {
-            let message = format!("Stream stopped with error {}", error.code());
+            let message = msg::STREAM_STOPPED.detail(error.code());
             log::warn!("{message}");
             *self.ivars().shared.state.lock() = CaptureState::Failed(message);
         }
@@ -792,7 +799,7 @@ impl Drop for SckCapture {
 }
 
 /// `init_audio_screen_stream`.
-fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     let (tx, rx) = mpsc::channel();
     let block = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -809,8 +816,8 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&block) };
     let content = rx
         .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "Screen capture content timed out".to_string())?
-        .map_err(|_| "Screen Recording permission is required for desktop audio".to_string())?
+        .map_err(|_| msg::SCREEN_TIMEOUT)?
+        .map_err(|_| msg::SCREEN_PERMISSION)?
         .0;
 
     // SAFETY: ScreenCaptureKit setup mirroring OBS.
@@ -820,7 +827,7 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
         let display = displays
             .iter()
             .find(|d| d.displayID() == main)
-            .ok_or_else(|| "Main display not found".to_string())?;
+            .ok_or(msg::MAIN_DISPLAY)?;
 
         let empty = NSArray::new();
         let filter = SCContentFilter::initWithDisplay_excludingWindows(
@@ -859,14 +866,14 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
                 SCStreamOutputType::Screen,
                 None,
             )
-            .map_err(|e| format!("Failed to add video stream output: {}", e.code()))?;
+            .map_err(|e| msg::VIDEO_STREAM_OUTPUT.detail(e.code()))?;
         stream
             .addStreamOutput_type_sampleHandlerQueue_error(
                 ProtocolObject::from_ref(&*delegate),
                 SCStreamOutputType::Audio,
                 None,
             )
-            .map_err(|e| format!("Failed to add audio stream output: {}", e.code()))?;
+            .map_err(|e| msg::AUDIO_STREAM_OUTPUT.detail(e.code()))?;
 
         let (tx, rx) = mpsc::channel();
         let block = RcBlock::new(move |err: *mut NSError| {
@@ -875,7 +882,7 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
         stream.startCaptureWithCompletionHandler(Some(&block));
         let started = rx.recv_timeout(Duration::from_secs(10)).unwrap_or(false);
         if !started {
-            return Err("Failed to start capture".into());
+            return Err(msg::CAPTURE_START.into());
         }
 
         *shared.state.lock() = CaptureState::Active {
@@ -1209,7 +1216,7 @@ unsafe extern "C" fn device_notification(
     // once and never changed, so every holder only ever shares it.
     let watch = unsafe { &*(client_data as *const DeviceWatch) };
     log::info!("coreaudio: device '{}' disconnected or changed", watch.uid);
-    *watch.state.lock() = CaptureState::Retrying("Device disconnected".into());
+    *watch.state.lock() = CaptureState::Retrying(msg::DEVICE_DISCONNECTED.into());
     noErr
 }
 
@@ -1395,7 +1402,7 @@ struct InputCapture {
 }
 
 /// Initial try, then the reconnect thread of `mac-audio.c` (2 s retries).
-fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     let state = Arc::new(Mutex::new(CaptureState::Starting));
     let data = Arc::new(Mutex::new(Box::new(CoreAudioData {
         hub,
@@ -1432,7 +1439,7 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Strin
                             ca.uninit();
                         }
                         if !ca.au_initialized && !ca.init() {
-                            ca.set_state(CaptureState::Retrying("Waiting for the device".into()));
+                            ca.set_state(CaptureState::Retrying(msg::WAITING_FOR_DEVICE.into()));
                         }
                     }
                 }
@@ -1443,7 +1450,7 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Strin
                     std::thread::sleep(Duration::from_millis(100));
                 }
             })
-            .map_err(|e| e.to_string())?
+            .map_err(|e| msg::SYSTEM.detail(e))?
     };
 
     Ok(Box::new(InputCapture {
@@ -1471,7 +1478,7 @@ impl Drop for InputCapture {
     }
 }
 
-pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     if source == DESKTOP {
         start_desktop(hub)
     } else if let Some(uid) = source
@@ -1480,7 +1487,7 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
     {
         start_input(uid, hub)
     } else {
-        Err(format!("Unknown source {source}"))
+        Err(msg::UNKNOWN_SOURCE.detail(source))
     }
 }
 
@@ -1492,6 +1499,8 @@ struct QueueState {
     empty_buffers: VecDeque<AudioQueueBufferRef>,
     new_data: VecDeque<u8>,
     buffer_size: usize,
+    /// Cap on `new_data`, from [`MAX_BACKLOG_MS`].
+    max_backlog: usize,
     wait_size: usize,
     paused: bool,
 }
@@ -1509,6 +1518,9 @@ struct QueueMonitor {
     active: AtomicBool,
     channels: usize,
     format: String,
+    /// Frames dropped because the backlog was cut back. Logged on powers of
+    /// two, like the skipped packets of `wasapi.rs`.
+    dropped: AtomicU64,
 }
 
 // SAFETY: the queue is thread safe; buffers are guarded by `state`.
@@ -1591,6 +1603,17 @@ impl AudioCallback for QueueMonitor {
 
         let mut st = self.state.lock();
         st.new_data.extend(data.iter().copied());
+        // The queue is not draining what the source produces: drop the
+        // oldest audio rather than play further and further behind it.
+        if st.new_data.len() > st.max_backlog {
+            let excess = st.new_data.len() - st.max_backlog;
+            st.new_data.drain(..excess);
+            let frames = excess / (size_of::<f32>() * self.channels);
+            let total = self.dropped.fetch_add(frames as u64, Ordering::Relaxed) + frames as u64;
+            if total.is_power_of_two() {
+                log::warn!("'{}': {total} frames dropped so far", self.device);
+            }
+        }
         if st.new_data.len() >= st.wait_size {
             st.wait_size = 0;
             // SAFETY: queue calls under the monitor mutex, as in OBS.
@@ -1622,7 +1645,7 @@ impl Monitor for QueueMonitor {
             Some(id) if device_is_alive(id) => MonitorState::Playing {
                 format: self.format.clone(),
             },
-            _ => MonitorState::Reconnecting("Device disconnected".into()),
+            _ => MonitorState::Reconnecting(msg::DEVICE_DISCONNECTED.into()),
         }
     }
 }
@@ -1653,7 +1676,7 @@ pub fn create_monitor(
     source: &str,
     device: &str,
     shared: Arc<OutputShared>,
-) -> Result<MonitorInit, String> {
+) -> Result<MonitorInit, Message> {
     if source.strip_prefix(OUTPUT_PREFIX) == Some(device) {
         return Ok(MonitorInit::Ignored);
     }
@@ -1681,8 +1704,7 @@ pub fn create_monitor(
         format: SampleFormat::Float,
         ..from
     };
-    let resampler =
-        Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
+    let resampler = Resampler::new(to, from).ok_or(msg::RESAMPLER)?;
 
     let mut monitor = Arc::new(QueueMonitor {
         device: device.to_string(),
@@ -1692,6 +1714,8 @@ pub fn create_monitor(
             empty_buffers: VecDeque::new(),
             new_data: VecDeque::new(),
             buffer_size,
+            max_backlog: size_of::<f32>() * channels * OBS_SAMPLE_RATE as usize / 1000
+                * MAX_BACKLOG_MS,
             wait_size: buffer_size * 3,
             paused: false,
         }),
@@ -1700,6 +1724,7 @@ pub fn create_monitor(
         active: AtomicBool::new(false),
         channels,
         format: describe(OBS_SAMPLE_RATE, channels),
+        dropped: AtomicU64::new(0),
     });
 
     let user_data = Arc::as_ptr(&monitor) as *mut c_void;
@@ -1717,10 +1742,10 @@ pub fn create_monitor(
             &mut m.queue,
         );
         if !ca_success(stat, "AudioQueueNewOutput") {
-            return Err("Failed to create the audio queue".into());
+            return Err(msg::QUEUE_CREATE.into());
         }
 
-        let uid = std::ffi::CString::new(device).map_err(|e| e.to_string())?;
+        let uid = std::ffi::CString::new(device).map_err(|e| msg::SYSTEM.detail(e))?;
         let cf_uid = CFStringCreateWithCString(ptr::null(), uid.as_ptr(), kCFStringEncodingUTF8);
         let stat = AudioQueueSetProperty(
             m.queue,
@@ -1730,26 +1755,26 @@ pub fn create_monitor(
         );
         CFRelease(cf_uid);
         if !ca_success(stat, "set current device") {
-            return Err("Output device unavailable".into());
+            return Err(msg::OUTPUT_UNAVAILABLE.into());
         }
 
         if !ca_success(
             AudioQueueSetParameter(m.queue, kAudioQueueParam_Volume, 1.0),
             "set volume",
         ) {
-            return Err("Failed to set the queue volume".into());
+            return Err(msg::QUEUE_VOLUME.into());
         }
 
         for i in 0..3 {
             let stat = AudioQueueAllocateBuffer(m.queue, buffer_size as u32, &mut m.buffers[i]);
             if !ca_success(stat, "allocation of buffer") {
-                return Err("Failed to allocate audio buffers".into());
+                return Err(msg::QUEUE_BUFFERS.into());
             }
             m.state.get_mut().empty_buffers.push_back(m.buffers[i]);
         }
 
         if !ca_success(AudioQueueStart(m.queue, ptr::null()), "start") {
-            return Err("Failed to start the audio queue".into());
+            return Err(msg::QUEUE_START.into());
         }
     }
     m.active.store(true, Ordering::Relaxed);

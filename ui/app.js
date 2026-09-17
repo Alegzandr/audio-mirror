@@ -381,7 +381,7 @@ function applyStatus() {
   }
 }
 
-/** @param {string | null} message */
+/** @param {EngineMessage | null} message */
 function retrying(message) {
   return t("error.retrying", { message: engineMessage(message) });
 }
@@ -612,7 +612,13 @@ function demoInvoke(cmd, ...args) {
       source: { state: "playing", message: null, format: "48 kHz, stereo", peak: wave(0) },
       outputs: enabled.map((o) =>
         o.id === "wasapi:hdmi"
-          ? { id: o.id, state: "error", message: "Device disconnected", format: null, peak: 0 }
+          ? {
+              id: o.id,
+              state: "error",
+              message: { code: "deviceDisconnected", text: "Device disconnected", detail: null },
+              format: null,
+              peak: 0,
+            }
           : { id: o.id, state: "playing", message: null, format: "48 kHz, stereo", peak: wave(0) * o.fader },
       ),
     }),

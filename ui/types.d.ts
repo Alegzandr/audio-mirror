@@ -51,10 +51,20 @@ interface Snapshot {
 /** `audio::NodeState` */
 type NodeState = "idle" | "starting" | "playing" | "error" | "blocked";
 
+/** `audio::message::Message` */
+interface EngineMessage {
+  /** Translation key, looked up in the table of `ui/i18n.js`. */
+  code: string;
+  /** English wording, shown when the code has no translation. */
+  text: string;
+  /** Untranslatable part, such as an `HRESULT` or a system error. */
+  detail: string | null;
+}
+
 /** `audio::SourceStatus` */
 interface SourceStatus {
   state: NodeState;
-  message: string | null;
+  message: EngineMessage | null;
   format: string | null;
   peak: number;
 }
@@ -128,6 +138,6 @@ interface Window {
 interface I18n {
   lang: string;
   t(key: string, vars?: Record<string, string | number>): string;
-  engineMessage(message: string | null): string;
+  engineMessage(message: EngineMessage | null): string;
   formatNumber(n: number): string;
 }

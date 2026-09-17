@@ -11,6 +11,7 @@
 
 pub mod format;
 pub mod hub;
+pub mod message;
 pub mod swr;
 pub mod volume;
 
@@ -39,6 +40,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 
 use hub::{AudioCallback, CallbackId, SourceHub};
+use message::{self as msg, Message};
 use volume::OutputShared;
 
 /// Id of the system default output, captured like OBS's "Desktop Audio".
@@ -108,14 +110,15 @@ pub(crate) type Watcher = Option<Box<dyn std::any::Any + Send + Sync>>;
 pub(crate) trait Platform: Send + Sync + 'static {
     /// Prepares the calling thread, where the backend needs it (COM).
     fn init_thread(&self);
-    fn enumerate(&self) -> Result<DeviceList, String>;
-    fn start_capture(&self, source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String>;
+    fn enumerate(&self) -> Result<DeviceList, Message>;
+    fn start_capture(&self, source: &str, hub: Arc<SourceHub>)
+        -> Result<Box<dyn Capture>, Message>;
     fn create_monitor(
         &self,
         source: &str,
         device: &str,
         shared: Arc<OutputShared>,
-    ) -> Result<MonitorInit, String>;
+    ) -> Result<MonitorInit, Message>;
     fn watch_system(&self, callback: EventCallback) -> Watcher;
 }
 
@@ -127,11 +130,15 @@ impl Platform for Native {
         platform::init_thread();
     }
 
-    fn enumerate(&self) -> Result<DeviceList, String> {
+    fn enumerate(&self) -> Result<DeviceList, Message> {
         platform::enumerate()
     }
 
-    fn start_capture(&self, source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+    fn start_capture(
+        &self,
+        source: &str,
+        hub: Arc<SourceHub>,
+    ) -> Result<Box<dyn Capture>, Message> {
         platform::start_capture(source, hub)
     }
 
@@ -140,7 +147,7 @@ impl Platform for Native {
         source: &str,
         device: &str,
         shared: Arc<OutputShared>,
-    ) -> Result<MonitorInit, String> {
+    ) -> Result<MonitorInit, Message> {
         platform::create_monitor(source, device, shared)
     }
 
@@ -149,7 +156,7 @@ impl Platform for Native {
     }
 }
 
-pub fn enumerate() -> Result<DeviceList, String> {
+pub fn enumerate() -> Result<DeviceList, Message> {
     let mut list = Native.enumerate()?;
     // Name the device the default output currently points to.
     if let Some(current) = list.outputs.iter().find(|o| o.is_default) {
@@ -169,9 +176,9 @@ pub enum CaptureState {
         format: String,
     },
     /// The capture retries on its own (WASAPI).
-    Retrying(String),
+    Retrying(Message),
     /// The capture stopped for good; the session restarts it.
-    Failed(String),
+    Failed(Message),
 }
 
 /// A running source capture. Dropping it stops the capture.
@@ -190,7 +197,7 @@ pub enum MonitorState {
         format: String,
     },
     /// The device is being reopened after a failure.
-    Reconnecting(String),
+    Reconnecting(Message),
 }
 
 /// A monitor is a capture callback of the source, like in libobs.
@@ -237,7 +244,7 @@ pub enum NodeState {
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceStatus {
     pub state: NodeState,
-    pub message: Option<String>,
+    pub message: Option<Message>,
     pub format: Option<String>,
     pub peak: f32,
 }
@@ -246,7 +253,7 @@ pub struct SourceStatus {
 pub struct OutputStatus {
     pub id: String,
     pub state: NodeState,
-    pub message: Option<String>,
+    pub message: Option<Message>,
     pub format: Option<String>,
     pub peak: f32,
 }
@@ -426,7 +433,7 @@ enum Slot {
     },
     Ignored,
     Failed {
-        error: String,
+        error: Message,
         retry_at: Instant,
     },
 }
@@ -437,7 +444,7 @@ struct Session {
     retry: Duration,
     source: String,
     hub: Arc<SourceHub>,
-    capture: Result<Box<dyn Capture>, String>,
+    capture: Result<Box<dyn Capture>, Message>,
     /// Refreshed once per tick and read from there afterwards, like a
     /// monitor's, so one pass never asks the same backend twice.
     capture_state: CaptureState,
@@ -476,8 +483,9 @@ impl Session {
     }
 
     fn reopen_capture(&mut self) {
-        // Drop the old capture before opening the device again.
-        self.capture = Err(String::new());
+        // Close the device before opening it again. The placeholder is what
+        // the panel shows if the new capture is slow to answer.
+        self.capture = Err(msg::WAITING_FOR_DEVICE.into());
         self.capture = self.platform.start_capture(&self.source, self.hub.clone());
         if let Err(e) = &self.capture {
             log::warn!("capture: {e}");
@@ -834,13 +842,13 @@ impl Supervisor {
                         MonitorState::Playing { format } => {
                             (NodeState::Playing, None, Some(format.clone()))
                         }
-                        MonitorState::Reconnecting(msg) => {
-                            (NodeState::Error, Some(msg.clone()), None)
+                        MonitorState::Reconnecting(why) => {
+                            (NodeState::Error, Some(why.clone()), None)
                         }
                     },
                     Some(Slot::Ignored) => (
                         NodeState::Blocked,
-                        Some("Captured by the source".to_string()),
+                        Some(msg::CAPTURED_BY_SOURCE.into()),
                         None,
                     ),
                     Some(Slot::Failed { error, .. }) => {
@@ -899,7 +907,7 @@ mod tests {
         }
 
         fn lose_device(&self) {
-            *self.0.lock() = MonitorState::Reconnecting("Device disconnected".into());
+            *self.0.lock() = MonitorState::Reconnecting(msg::DEVICE_DISCONNECTED.into());
         }
     }
 
@@ -946,7 +954,7 @@ mod tests {
     #[derive(Default)]
     struct FakePlatform {
         /// Devices whose monitor refuses to open, and why.
-        refusing: Mutex<HashMap<String, String>>,
+        refusing: Mutex<HashMap<String, Message>>,
         /// Devices the source records, so they come back `Ignored`.
         captured: Mutex<HashSet<String>>,
         /// Every monitor handed out, in order, so rebuilds can be counted.
@@ -961,7 +969,7 @@ mod tests {
     }
 
     impl FakePlatform {
-        fn refuse(&self, device: &str, why: &str) {
+        fn refuse(&self, device: &str, why: msg::Kind) {
             self.refusing.lock().insert(device.into(), why.into());
         }
 
@@ -992,7 +1000,7 @@ mod tests {
     impl Platform for FakePlatform {
         fn init_thread(&self) {}
 
-        fn enumerate(&self) -> Result<DeviceList, String> {
+        fn enumerate(&self) -> Result<DeviceList, Message> {
             Ok(DeviceList::default())
         }
 
@@ -1000,7 +1008,7 @@ mod tests {
             &self,
             _source: &str,
             _hub: Arc<SourceHub>,
-        ) -> Result<Box<dyn Capture>, String> {
+        ) -> Result<Box<dyn Capture>, Message> {
             self.captures_started.fetch_add(1, Ordering::Relaxed);
             let capture = Arc::new(FakeCapture {
                 state: Mutex::new(CaptureState::Active {
@@ -1017,7 +1025,7 @@ mod tests {
             _source: &str,
             device: &str,
             _shared: Arc<OutputShared>,
-        ) -> Result<MonitorInit, String> {
+        ) -> Result<MonitorInit, Message> {
             self.built.lock().push(device.to_string());
             if self
                 .panics_left
@@ -1110,7 +1118,7 @@ mod tests {
     #[test]
     fn an_output_that_cannot_be_opened_is_retried_until_it_works() {
         let fake = Arc::new(FakePlatform::default());
-        fake.refuse("out", "Device unavailable");
+        fake.refuse("out", msg::DEVICE_UNAVAILABLE);
         let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
         engine.apply(one_output("out"));
 
@@ -1118,7 +1126,7 @@ mod tests {
             output_state(&engine, "out") == Some(NodeState::Error)
         });
         let message = engine.status().outputs[0].message.clone();
-        assert_eq!(message.as_deref(), Some("Device unavailable"));
+        assert_eq!(message, Some(msg::DEVICE_UNAVAILABLE.into()));
 
         eventually("a retry", || fake.built("out") >= 2);
         fake.accept("out");
@@ -1155,7 +1163,7 @@ mod tests {
         });
 
         *fake.capture.lock().as_ref().unwrap().state.lock() =
-            CaptureState::Failed("Device disconnected".into());
+            CaptureState::Failed(msg::DEVICE_DISCONNECTED.into());
         eventually("the capture to be reopened", || {
             fake.captures_started() >= 2
         });
@@ -1194,7 +1202,7 @@ mod tests {
         const SLOW: Duration = Duration::from_secs(30);
 
         let fake = Arc::new(FakePlatform::default());
-        fake.refuse("out", "Device unavailable");
+        fake.refuse("out", msg::DEVICE_UNAVAILABLE);
         let engine = Engine::with_retry(fake.clone(), SLOW);
         engine.apply(one_output("out"));
         eventually("the failure to show", || {
@@ -1310,7 +1318,7 @@ mod tests {
 
         // A device that could not be opened keeps its own retry schedule.
         let failed = Slot::Failed {
-            error: "nope".into(),
+            error: msg::DEVICE_UNAVAILABLE.into(),
             retry_at: now + MONITOR_RETRY,
         };
         assert!(!slot_is_due(&failed, now, MONITOR_RETRY));

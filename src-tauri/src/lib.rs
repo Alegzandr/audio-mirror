@@ -57,7 +57,8 @@ struct Snapshot {
 async fn snapshot(app: AppHandle, state: State<'_, AppState>) -> Result<Snapshot, String> {
     let devices = tauri::async_runtime::spawn_blocking(audio::enumerate)
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     Ok(Snapshot {
         version: app.package_info().version.to_string(),
         config: state.config.lock().clone(),

@@ -213,13 +213,15 @@ The audio engine is a port of OBS Studio's desktop audio capture and audio monit
 | --- | --- | --- | --- |
 | Default output | WASAPI loopback of the default output, follows it when it changes (`win-wasapi`) | ScreenCaptureKit, this app's own audio excluded (`mac-sck-audio-capture.m`) | Default sink's `.monitor` (`pulse-input.c`), reopened when the default sink changes |
 | Other sources | Loopback of a given output, input devices | Input devices through AUHAL (`mac-audio.c`), loopback drivers as output captures | Other monitors, input sources |
-| Monitoring | Written to WASAPI as each packet arrives, client reopened on failure (`wasapi-output.c`) | AudioQueue, three 30 ms buffers, 90 ms prefill (`coreaudio-output.c`) | Corked stream uncorked at 25 ms, buffer grown on backlog (`pulseaudio-output.c`) |
+| Monitoring | Written to WASAPI as each packet arrives, client reopened on failure (`wasapi-output.c`) | AudioQueue, three 30 ms buffers, 90 ms prefill (`coreaudio-output.c`) | Corked stream uncorked at 25 ms, pinned to its sink, buffer grown on backlog (`pulseaudio-output.c`) |
 | Reconnection | Capture retries every 3 s and restarts when the default output changes; monitors are rebuilt on that change | Input capture retries every 2 s | Streams are reopened after 3 s |
 
 Shared by all platforms, as in libobs:
 
 - Each source is converted to 48 kHz stereo float (`process_audio`), then handed to the monitors on the capture thread (`source_signal_audio_data`).
 - Each monitor converts to its device format with FFmpeg's libswresample, using OBS's settings and mono upmix matrix, then applies its volume. The slider uses OBS's logarithmic fader curve.
+- Each monitor caps its backlog at 400 ms: an output that cannot keep up with the source, two clocks apart or a device asleep, loses the oldest audio instead of playing further and further behind. Dropped frames are logged on powers of two.
+- Every status message carries a stable code as well as OBS's English wording, so the panel translates it by code and falls back to that wording for a message it does not know.
 - An output recorded by the source is never a destination (`OBS_SOURCE_DO_NOT_SELF_MONITOR`). On macOS the capture leaves this app out, so any output can be used with the default output source.
 
 Code layout, in `src-tauri/src/audio`:
@@ -227,6 +229,7 @@ Code layout, in `src-tauri/src/audio`:
 | File | Port of |
 | --- | --- |
 | `hub.rs` | Audio half of `obs-source.c` |
+| `message.rs` | Status messages: OBS's English wording, plus a code the panel translates |
 | `swr.rs` | `media-io/audio-resampler-ffmpeg.c` |
 | `wasapi.rs` | `win-wasapi.cpp`, `audio-monitoring/win32` |
 | `coreaudio.rs` | `mac-sck-audio-capture.m`, `mac-audio.c`, `audio-monitoring/osx` |
