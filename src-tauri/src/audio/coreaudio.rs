@@ -487,6 +487,29 @@ fn device_id_for_uid(uid: &str) -> Option<AudioObjectID> {
     }
 }
 
+/// `kAudioDevicePropertyDeviceIsAlive`. A device that was unplugged answers
+/// false, or stops answering at all.
+fn device_is_alive(id: AudioObjectID) -> bool {
+    let addr = address(
+        kAudioDevicePropertyDeviceIsAlive,
+        kAudioObjectPropertyScopeGlobal,
+    );
+    let mut alive = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: fixed size output.
+    let stat = unsafe {
+        AudioObjectGetPropertyData(
+            id,
+            &addr,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut alive as *mut _ as *mut c_void,
+        )
+    };
+    stat == noErr && alive != 0
+}
+
 /// `device_is_input` of `audio-device-enum.c`: loopback drivers are shown as
 /// output captures.
 fn device_is_input(name: &str) -> bool {
@@ -1387,6 +1410,9 @@ struct QueueState {
 }
 
 struct QueueMonitor {
+    /// UID of the output device, resolved again on every status read so an
+    /// unplugged device is noticed.
+    device: String,
     queue: AudioQueueRef,
     buffers: [AudioQueueBufferRef; 3],
     /// `monitor->mutex`.
@@ -1493,9 +1519,17 @@ impl AudioCallback for QueueMonitor {
 }
 
 impl Monitor for QueueMonitor {
+    /// An AudioQueue whose device went away keeps taking buffers and plays
+    /// none of them, so the device is what has to be looked at. OBS only
+    /// builds monitors from the UI and so never looks; a background mirror
+    /// has to, otherwise the output stays silent while the panel reports it
+    /// as playing.
     fn state(&self) -> MonitorState {
-        MonitorState::Playing {
-            format: self.format.clone(),
+        match device_id_for_uid(&self.device) {
+            Some(id) if device_is_alive(id) => MonitorState::Playing {
+                format: self.format.clone(),
+            },
+            _ => MonitorState::Reconnecting("Device disconnected".into()),
         }
     }
 }
@@ -1558,6 +1592,7 @@ pub fn create_monitor(
         Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
 
     let mut monitor = Arc::new(QueueMonitor {
+        device: device.to_string(),
         queue: ptr::null_mut(),
         buffers: [ptr::null_mut(); 3],
         state: Mutex::new(QueueState {
