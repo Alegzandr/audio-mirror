@@ -81,29 +81,8 @@
   }
 
   /**
-   * Every row of the output list: the devices that are here, then the ones
-   * turned on that are not, so an unplugged output can be seen and dropped
-   * rather than disappearing with its volume.
-   * @param {DeviceList} devices
-   * @param {AppConfig} config
-   * @returns {OutputRow[]}
-   */
-  function outputRows(devices, config) {
-    const present = devices.outputs;
-    const absent = config.outputs
-      .filter((o) => o.enabled && !present.some((d) => d.id === o.id))
-      .map((o) => ({
-        id: o.id,
-        name: o.name || i18n().t("output.unknown"),
-        is_default: false,
-        absent: true,
-      }));
-    return [...present, ...absent];
-  }
-
-  /**
    * Output the current source records: playing into it would feed back, so
-   * the engine skips it and the panel says why.
+   * the engine skips it and the panel leaves it out.
    * @param {DeviceList} devices
    * @param {AppConfig} config
    */
@@ -113,18 +92,35 @@
   }
 
   /**
-   * The line in the header: what the engine is doing right now.
+   * Every row of the output list: the devices that are here, in the order
+   * the system gave them, except the one the source records. An unplugged
+   * output is not listed; its settings wait for it to come back.
+   * @param {DeviceList} devices
+   * @param {AppConfig} config
+   * @returns {OutputInfo[]}
+   */
+  function outputRows(devices, config) {
+    const captured = capturedOutput(devices, config);
+    return devices.outputs.filter((d) => d.id !== captured);
+  }
+
+  /**
+   * The line in the header: what the engine is doing right now, counting
+   * only the outputs the list shows.
    * @param {Status | null} status
+   * @param {OutputInfo[]} rows From `outputRows`.
    * @returns {{ text: string, tone: string }}
    */
-  function runState(status) {
+  function runState(status, rows) {
     const { t } = i18n();
     if (!status || !status.running) return { text: t("run.off"), tone: "muted" };
     if (status.source.state === "error") {
       return { text: t("run.sourceError"), tone: "error" };
     }
-    const total = status.outputs.length;
-    const playing = status.outputs.filter((o) => o.state === "playing").length;
+    const shown = status.outputs.filter((o) => rows.some((r) => r.id === o.id));
+    const total = shown.length;
+    if (!total) return { text: t("run.off"), tone: "muted" };
+    const playing = shown.filter((o) => o.state === "playing").length;
     const text =
       playing === total ? t("run.mirroring", { count: total }) : t("run.partial", { playing, total });
     return { text, tone: "on" };

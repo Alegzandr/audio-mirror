@@ -24,7 +24,6 @@ const {
   meterDb,
   sourceName,
   outputRows,
-  capturedOutput,
   runState,
   outputState,
   retrying,
@@ -45,6 +44,8 @@ let snapshot;
 let status = null;
 /** Last device change the engine reported, so the list is re-read once. */
 let devicesRevision = -1;
+/** @type {OutputInfo[]} The devices the list shows, from `outputRows`. */
+let shown = [];
 /** @type {Map<string, HTMLElement>} */
 const rows = new Map();
 /** @type {Map<string, Meter>} */
@@ -145,18 +146,18 @@ function outputConfig(id) {
 }
 
 function enabledCount() {
-  return snapshot.config.outputs.filter((o) => o.enabled).length;
+  return shown.filter((d) => outputConfig(d.id)?.enabled).length;
 }
 
 function renderOutputs() {
   const list = $("outputs");
-  const all = outputRows(snapshot.devices, snapshot.config);
+  shown = outputRows(snapshot.devices, snapshot.config);
 
   list.replaceChildren();
   rows.clear();
   meters.clear();
 
-  if (!all.length) {
+  if (!shown.length) {
     const p = document.createElement("p");
     p.className = "row empty";
     p.textContent = t("outputs.none");
@@ -171,9 +172,8 @@ function renderOutputs() {
     list.append(p);
   }
 
-  const captured = capturedOutput(snapshot.devices, snapshot.config);
   const tpl = /** @type {HTMLTemplateElement} */ ($("output-row"));
-  all.forEach((dev, i) => {
+  shown.forEach((dev, i) => {
     const node = /** @type {HTMLElement} */ (tpl.content.firstElementChild?.cloneNode(true));
     const cfg = outputConfig(dev.id) || { enabled: false, fader: 1, muted: false };
     const sw = /** @type {HTMLInputElement} */ (find(node, ".output-enabled"));
@@ -185,7 +185,6 @@ function renderOutputs() {
     node.dataset.id = dev.id;
     node.dataset.name = dev.name;
     node.dataset.enabled = String(cfg.enabled);
-    node.dataset.absent = String(Boolean(dev.absent));
     sw.id = `output-${i}`;
     sw.checked = cfg.enabled;
     name.htmlFor = sw.id;
@@ -196,22 +195,6 @@ function renderOutputs() {
     meter.setAttribute("aria-label", t("output.level", { name: dev.name }));
     setMuted(node, cfg.muted);
     updateFaderView(node, cfg.fader);
-
-    if (dev.id === captured && !cfg.enabled) {
-      sw.disabled = true;
-      setDetail(node, t("output.echo"));
-    }
-
-    if (dev.absent) {
-      sw.disabled = true;
-      const forget = document.createElement("button");
-      forget.type = "button";
-      forget.className = "btn";
-      forget.textContent = t("output.forget");
-      forget.dataset.action = "forget";
-      find(node, ".output-head").append(forget);
-      setState(node, t("output.notConnected"), "muted");
-    }
 
     list.append(node);
     rows.set(dev.id, node);
@@ -287,7 +270,7 @@ function applyStatus() {
   const live = status && status.running ? status : null;
   const src = live ? live.source : null;
 
-  const run = runState(live);
+  const run = runState(live, shown);
   setRunState(run.text, run.tone);
 
   const err = $("source-error");
@@ -298,7 +281,6 @@ function applyStatus() {
 
   const byId = new Map((live ? live.outputs : []).map((o) => [o.id, o]));
   for (const [id, node] of rows) {
-    if (node.dataset.absent === "true") continue;
     const enabled = node.dataset.enabled === "true";
     const st = byId.get(id);
     const { label, tone, detail } = outputState(st, {
@@ -306,10 +288,7 @@ function applyStatus() {
       muted: node.dataset.muted === "true",
     });
     setState(node, label, tone);
-    // A row whose switch is disabled carries a standing explanation (the
-    // source records it), which the status must not wipe.
-    const locked = /** @type {HTMLInputElement} */ (find(node, ".output-enabled")).disabled;
-    if (!(locked && !detail)) setDetail(node, detail);
+    setDetail(node, detail);
     pushLevel(id, enabled && st ? st.peak : 0);
   }
 }
@@ -445,10 +424,6 @@ $("outputs").addEventListener("click", async (e) => {
     localOutput(node).muted = muted;
     setMuted(node, muted);
     applyStatus();
-  } else if (btn.dataset.action === "forget") {
-    await call("forget_output", { id });
-    snapshot.config.outputs = snapshot.config.outputs.filter((o) => o.id !== id);
-    renderOutputs();
   }
 });
 

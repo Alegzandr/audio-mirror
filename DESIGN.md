@@ -196,7 +196,7 @@ A neutral, OS-following gray palette with a single restrained blue and a single 
 
 ## Layout
 
-A fixed three-row grid fills the window: header (16px top, 12px bottom), scrolling main, footer (10px vertical). The 16px side gutter is shared by all three. Main stacks groups with an 18px gap; inside a group, the heading sits 6px above its list. Rows have a 44px minimum height and 10px by 14px padding; source and output rows use 12px by 14px. Output rows are a stack: a head line (switch, name, state text) and, below it, controls (slider with meter under it, dB value, Mute) indented 46px so they align with the device name. Detail text uses the same indent. Disabled or absent outputs hide their controls. The dB column is a fixed 8ch, right-aligned. The header gains a hairline only after the list scrolls.
+A fixed three-row grid fills the window: header (16px top, 12px bottom), scrolling main, footer (10px vertical). The 16px side gutter is shared by all three. Main stacks groups with an 18px gap; inside a group, the heading sits 6px above its list. Rows have a 44px minimum height and 10px by 14px padding; source and output rows use 12px by 14px. Output rows are a stack: a head line (switch, name, state text) and, below it, controls (slider with meter under it, dB value, Mute) indented 46px so they align with the device name. Detail text uses the same indent. Disabled outputs hide their controls. The dB column is a fixed 8ch, right-aligned. The header gains a hairline only after the list scrolls.
 
 ## Elevation & Depth
 

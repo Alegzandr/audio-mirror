@@ -15,7 +15,7 @@ use crate::audio::{EngineConfig, OutputSpec, DESKTOP};
 #[serde(default)]
 pub struct OutputConfig {
     pub id: String,
-    /// Last known name, to show an unplugged device.
+    /// Last known name, to tell entries apart in the settings file.
     pub name: String,
     pub enabled: bool,
     /// Slider position from 0 to 1 (OBS logarithmic curve).
