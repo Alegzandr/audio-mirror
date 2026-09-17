@@ -207,7 +207,7 @@ To uninstall, turn off **Start with system** in the panel, quit the app, then de
 
 ## How it works
 
-The audio engine is a port of OBS Studio's desktop audio capture and audio monitoring, with three differences: a source feeds N monitors instead of one, each output has its own mute, and an output that cannot be opened, or that goes away while it plays, is retried every 3 seconds. OBS reopens a monitor only when you change its monitoring device; an app that sits in the tray unattended has to notice by itself. Everything else follows the OBS code path by path.
+The audio engine is a port of OBS Studio's desktop audio capture and audio monitoring, with four differences: a source feeds N monitors instead of one, each output has its own mute, an output that cannot be opened, or that goes away while it plays, is retried every 3 seconds, and each output follows its device's clock. OBS reopens a monitor only when you change its monitoring device; an app that sits in the tray unattended has to notice by itself. And OBS lets a monitor drift from its source, which is harmless for a monitor checked now and then but not for a mirror left playing for hours. Everything else follows the OBS code path by path.
 
 | | Windows | macOS | Linux |
 | --- | --- | --- | --- |
@@ -220,7 +220,8 @@ Shared by all platforms, as in libobs:
 
 - Each source is converted to 48 kHz stereo float (`process_audio`), then handed to the monitors on the capture thread (`source_signal_audio_data`).
 - Each monitor converts to its device format with FFmpeg's libswresample, using OBS's settings and mono upmix matrix, then applies its volume. The slider uses OBS's logarithmic fader curve.
-- Each monitor caps its backlog at 400 ms: an output that cannot keep up with the source, two clocks apart or a device asleep, loses the oldest audio instead of playing further and further behind. Dropped frames are logged on powers of two.
+- Each monitor follows its device's clock. Two devices never count time exactly alike (tens of ppm apart on real hardware), so an output slowly fills up or runs dry. Each monitor reads how much audio its device still has to play from the device clock (`IAudioClock`, the Pulse stream latency, the AudioQueue sample time) and moves its resampler's ratio by a few ppm (`swr_set_compensation`) to keep that amount steady. The correction is at most 1000 ppm, under two cents of pitch, and is logged every 10 minutes.
+- Each monitor caps its backlog at 400 ms, as a safety net: an output that stalls, a device asleep for instance, loses the oldest audio instead of playing further and further behind. Dropped frames are logged on powers of two.
 - Every status message carries a stable code as well as OBS's English wording, so the panel translates it by code and falls back to that wording for a message it does not know.
 - An output recorded by the source is never a destination (`OBS_SOURCE_DO_NOT_SELF_MONITOR`). On macOS the capture leaves this app out, so any output can be used with the default output source.
 
@@ -230,7 +231,8 @@ Code layout, in `src-tauri/src/audio`:
 | --- | --- |
 | `hub.rs` | Audio half of `obs-source.c` |
 | `message.rs` | Status messages: OBS's English wording, plus a code the panel translates |
-| `swr.rs` | `media-io/audio-resampler-ffmpeg.c` |
+| `swr.rs` | `media-io/audio-resampler-ffmpeg.c`, plus the ratio correction |
+| `drift.rs` | No OBS equivalent: the clock drift loop |
 | `wasapi.rs` | `win-wasapi.cpp`, `audio-monitoring/win32` |
 | `coreaudio.rs` | `mac-sck-audio-capture.m`, `mac-audio.c`, `audio-monitoring/osx` |
 | `pulse.rs` | `pulse-input.c`, `audio-monitoring/pulse` |

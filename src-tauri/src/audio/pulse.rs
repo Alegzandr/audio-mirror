@@ -12,13 +12,15 @@
 //!   sink that goes away fails the stream the supervisor watches instead of
 //!   quietly taking this output's audio to another device, and the backlog
 //!   is capped, so a device that cannot keep up loses audio rather than
-//!   gaining latency without end.
+//!   gaining latency without end. The resampler also follows the sink's
+//!   clock (`drift.rs`), read from the stream latency, so that cap is only
+//!   reached when a device stalls.
 //!
 //! Each side owns its threaded mainloop and context, like the two OBS
 //! wrappers (`pulse-wrapper.c` and `pulseaudio-wrapper.c`).
 
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -27,6 +29,7 @@ use std::time::Instant;
 use libpulse_sys::*;
 use parking_lot::Mutex;
 
+use super::drift::DriftControl;
 use super::format::{
     AudioSpec, ObsAudio, SampleFormat, SourceAudio, Speakers, OBS_SAMPLE_RATE, OBS_SPEAKERS,
 };
@@ -884,6 +887,8 @@ struct MonitorStream {
     new_data: VecDeque<u8>,
     /// Cap on `new_data`, from [`MAX_BACKLOG_USEC`].
     max_backlog: usize,
+    rate: u32,
+    drift: DriftControl,
     resampler: Resampler,
 }
 
@@ -944,7 +949,7 @@ pub fn create_monitor(
         speakers,
         format: obs_format(info.format).unwrap_or(SampleFormat::Float),
     };
-    let resampler = Resampler::new(to, from).ok_or(msg::RESAMPLER)?;
+    let resampler = Resampler::adjustable(to, from).ok_or(msg::RESAMPLER)?;
 
     let map = channel_map(speakers);
     let stream = pulse.stream_new(c"Audio Mirror", &spec, &map);
@@ -1010,6 +1015,8 @@ pub fn create_monitor(
             new_data: VecDeque::new(),
             // SAFETY: valid spec.
             max_backlog: unsafe { pa_usec_to_bytes(MAX_BACKLOG_USEC, &spec) },
+            rate: info.rate,
+            drift: DriftControl::new(info.rate),
             resampler,
         }),
         format: describe(info.rate, info.channels as usize),
@@ -1030,8 +1037,28 @@ impl PulseMonitor {
         }
     }
 
-    /// `do_stream_write`.
-    fn stream_write(&self) {
+    /// Frames queued ahead of the sink before the last `written` frames:
+    /// the backlog here plus the stream latency, which Pulse interpolates
+    /// on the sink's clock. `None` until Pulse has timing for the stream.
+    ///
+    /// # Safety
+    /// Called under the monitor mainloop lock.
+    unsafe fn queued(data: &MonitorStream, written: u32) -> Option<f64> {
+        let mut usec: pa_usec_t = 0;
+        let mut negative: c_int = 0;
+        // SAFETY: the caller holds the mainloop lock.
+        if unsafe { pa_stream_get_latency(data.stream, &mut usec, &mut negative) } != 0 {
+            return None;
+        }
+        let latency = usec as f64 * f64::from(data.rate) / 1e6;
+        let latency = if negative != 0 { -latency } else { latency };
+        let backlog = (data.new_data.len() / data.bytes_per_frame.max(1)) as f64;
+        Some(backlog - f64::from(written) + latency)
+    }
+
+    /// `do_stream_write`. `written` is the number of frames the capture
+    /// thread just added to the backlog.
+    fn stream_write(&self, written: u32) {
         let pulse = monitor_loop();
         let _g = pulse.lock();
         let mut guard = self.playback.lock();
@@ -1066,6 +1093,20 @@ impl PulseMonitor {
                 let op = pa_stream_set_buffer_attr(data.stream, &data.attr, None, ptr::null_mut());
                 if !op.is_null() {
                     pa_operation_unref(op);
+                }
+            }
+
+            // Applied from the next packet on; see `drift.rs`.
+            if written > 0 && pa_stream_is_corked(data.stream) == 0 {
+                if let Some(queued) = Self::queued(data, written) {
+                    let ppm = data.drift.update(queued, written);
+                    data.resampler.set_drift(ppm);
+                    if let Some((ppm, off)) = data.drift.report() {
+                        log::info!(
+                            "'{}': clock {ppm:+.1} ppm, level {off:+.1} ms from its mark",
+                            self.device
+                        );
+                    }
                 }
             }
 
@@ -1120,14 +1161,16 @@ impl AudioCallback for PulseMonitor {
             // `TryAcquireSRWLockExclusive` in OBS: the packet is skipped,
             // which is audible, so it is counted.
             self.note_drop(audio.frames as usize);
-            self.stream_write();
+            self.stream_write(0);
             return;
         };
         let input = [
             audio.planes[0].as_ptr() as *const u8,
             audio.planes[1].as_ptr() as *const u8,
         ];
+        let mut written = 0;
         if let Some(frames) = data.resampler.resample(&input, audio.frames) {
+            written = frames;
             let bytes = data.bytes_per_frame * frames as usize;
             let vol = self.shared.volume();
             // Disjoint fields, so the samples are scaled in place and
@@ -1150,7 +1193,7 @@ impl AudioCallback for PulseMonitor {
             data.new_data.extend(samples.iter().copied());
         }
         drop(data);
-        self.stream_write();
+        self.stream_write(written);
     }
 }
 

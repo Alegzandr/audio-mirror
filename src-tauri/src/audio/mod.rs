@@ -7,8 +7,10 @@
 //! - Linux: `plugins/linux-pulseaudio` and `libobs/audio-monitoring/pulse`
 //!
 //! [`hub`] ports the source side of libobs that sits between the two, and
-//! [`swr`] the FFmpeg resampler OBS uses.
+//! [`swr`] the FFmpeg resampler OBS uses. [`drift`] has no OBS equivalent:
+//! it keeps each monitor on its device's clock.
 
+pub mod drift;
 pub mod format;
 pub mod hub;
 pub mod message;

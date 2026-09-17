@@ -8,7 +8,9 @@
 //!   drivers such as BlackHole are listed as output captures, like OBS does.
 //! - Monitoring: port of `libobs/audio-monitoring/osx/coreaudio-output.c`:
 //!   an AudioQueue in the OBS format, three 30 ms buffers and a 90 ms
-//!   prefill, paused and prefilled again whenever it runs dry.
+//!   prefill, paused and prefilled again whenever it runs dry. The resampler
+//!   follows the device's clock (`drift.rs`), read from the queue's sample
+//!   time, which OBS does not use.
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
@@ -33,6 +35,7 @@ use objc2_screen_capture_kit::{
 };
 use parking_lot::Mutex;
 
+use super::drift::DriftControl;
 use super::format::{
     AudioSpec, ObsAudio, SampleFormat, SourceAudio, Speakers, MAX_AUDIO_CHANNELS, OBS_CHANNELS,
     OBS_SAMPLE_RATE, OBS_SPEAKERS,
@@ -158,8 +161,13 @@ struct AudioBufferList {
 
 #[repr(C)]
 struct AudioTimeStamp {
-    _opaque: [u8; 64],
+    sample_time: f64,
+    _times_and_smpte: [u8; 48],
+    flags: u32,
+    _reserved: u32,
 }
+
+const kAudioTimeStampSampleTimeValid: u32 = 1;
 
 #[repr(C)]
 struct AudioValueTranslation {
@@ -319,6 +327,12 @@ unsafe extern "C" {
     ) -> OSStatus;
     fn AudioQueueStart(aq: AudioQueueRef, start_time: *const c_void) -> OSStatus;
     fn AudioQueuePause(aq: AudioQueueRef) -> OSStatus;
+    fn AudioQueueGetCurrentTime(
+        aq: AudioQueueRef,
+        timeline: *mut c_void,
+        time_stamp: *mut AudioTimeStamp,
+        discontinuity: *mut u8,
+    ) -> OSStatus;
     fn AudioQueueStop(aq: AudioQueueRef, immediate: u8) -> OSStatus;
     fn AudioQueueDispose(aq: AudioQueueRef, immediate: u8) -> OSStatus;
 }
@@ -1503,6 +1517,9 @@ struct QueueState {
     max_backlog: usize,
     wait_size: usize,
     paused: bool,
+    /// Frames handed to the queue since it started.
+    enqueued: u64,
+    drift: DriftControl,
 }
 
 struct QueueMonitor {
@@ -1546,6 +1563,7 @@ impl QueueMonitor {
             dst[head..].copy_from_slice(&back[..st.buffer_size - head]);
             st.new_data.drain(..st.buffer_size);
             (*buf).audio_data_byte_size = st.buffer_size as u32;
+            st.enqueued += (st.buffer_size / (size_of::<f32>() * self.channels)) as u64;
             let stat = AudioQueueEnqueueBuffer(self.queue, buf, 0, ptr::null());
             if !ca_success(stat, "AudioQueueEnqueueBuffer") {
                 AudioQueueStop(self.queue, 0);
@@ -1579,6 +1597,36 @@ unsafe extern "C" fn buffer_audio(
     }
 }
 
+impl QueueMonitor {
+    /// Frames queued ahead of the device: the backlog here plus what the
+    /// queue holds, from its own sample time, which runs on the device's
+    /// clock. Counting the buffers instead would move in 30 ms steps.
+    /// `None` while the queue waits for audio.
+    ///
+    /// # Safety
+    /// Called under the monitor mutex.
+    unsafe fn queued(&self, st: &QueueState) -> Option<f64> {
+        if st.paused || st.wait_size != 0 {
+            return None;
+        }
+        let mut time = AudioTimeStamp {
+            sample_time: 0.0,
+            _times_and_smpte: [0; 48],
+            flags: 0,
+            _reserved: 0,
+        };
+        // SAFETY: the queue lives as long as the monitor.
+        let stat = unsafe {
+            AudioQueueGetCurrentTime(self.queue, ptr::null_mut(), &mut time, ptr::null_mut())
+        };
+        if stat != noErr || time.flags & kAudioTimeStampSampleTimeValid == 0 {
+            return None;
+        }
+        let backlog = (st.new_data.len() / (size_of::<f32>() * self.channels)) as f64;
+        Some(backlog + st.enqueued as f64 - time.sample_time)
+    }
+}
+
 impl AudioCallback for QueueMonitor {
     /// `on_audio_playback`.
     fn on_audio(&self, audio: &ObsAudio) {
@@ -1602,7 +1650,21 @@ impl AudioCallback for QueueMonitor {
         self.shared.apply_f32(floats, vol);
 
         let mut st = self.state.lock();
-        st.new_data.extend(data.iter().copied());
+        // Applied from the next packet on; see `drift.rs`.
+        // SAFETY: queue call under the monitor mutex.
+        if let Some(queued) = unsafe { self.queued(&st) } {
+            let ppm = st.drift.update(queued, frames);
+            if let Some((ppm, off)) = st.drift.report() {
+                log::info!(
+                    "'{}': clock {ppm:+.1} ppm, level {off:+.1} ms from its mark",
+                    self.device
+                );
+            }
+            st.new_data.extend(data.iter().copied());
+            rs.set_drift(ppm);
+        } else {
+            st.new_data.extend(data.iter().copied());
+        }
         // The queue is not draining what the source produces: drop the
         // oldest audio rather than play further and further behind it.
         if st.new_data.len() > st.max_backlog {
@@ -1704,7 +1766,7 @@ pub fn create_monitor(
         format: SampleFormat::Float,
         ..from
     };
-    let resampler = Resampler::new(to, from).ok_or(msg::RESAMPLER)?;
+    let resampler = Resampler::adjustable(to, from).ok_or(msg::RESAMPLER)?;
 
     let mut monitor = Arc::new(QueueMonitor {
         device: device.to_string(),
@@ -1718,6 +1780,8 @@ pub fn create_monitor(
                 * MAX_BACKLOG_MS,
             wait_size: buffer_size * 3,
             paused: false,
+            enqueued: 0,
+            drift: DriftControl::new(OBS_SAMPLE_RATE),
         }),
         resampler: Mutex::new(resampler),
         shared,
