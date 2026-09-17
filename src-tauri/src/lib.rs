@@ -147,11 +147,6 @@ fn set_output_muted(
 }
 
 #[tauri::command]
-fn forget_output(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.update(|c| c.outputs.retain(|o| o.id != id))
-}
-
-#[tauri::command]
 fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
     let launcher = app.autolaunch();
     let result = if enabled {
@@ -276,7 +271,6 @@ pub fn run() {
             set_output_enabled,
             set_output_volume,
             set_output_muted,
-            forget_output,
             set_autostart,
             hide_panel,
             restart,

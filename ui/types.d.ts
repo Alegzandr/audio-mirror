@@ -97,7 +97,6 @@ interface Commands {
   set_output_enabled: { args: { id: string; name: string; enabled: boolean }; result: void };
   set_output_volume: { args: { id: string; name: string; fader: number; persist: boolean }; result: void };
   set_output_muted: { args: { id: string; name: string; muted: boolean }; result: void };
-  forget_output: { args: { id: string }; result: void };
   set_autostart: { args: { enabled: boolean }; result: boolean };
   hide_panel: { args: void; result: void };
   restart: { args: void; result: void };
@@ -136,11 +135,6 @@ interface Window {
   View: View;
 }
 
-/** A row of the output list: a device that is here, or a turned on one that is not. */
-interface OutputRow extends OutputInfo {
-  absent?: boolean;
-}
-
 /** `ui/view.js`: what the panel shows, worked out without a DOM. */
 interface View {
   faderToDb(def: number): number;
@@ -150,9 +144,9 @@ interface View {
   meterFall(level: number, target: number): number;
   meterDb(level: number): number;
   sourceName(source: SourceInfo): string;
-  outputRows(devices: DeviceList, config: AppConfig): OutputRow[];
+  outputRows(devices: DeviceList, config: AppConfig): OutputInfo[];
   capturedOutput(devices: DeviceList, config: AppConfig): string | null;
-  runState(status: Status | null): { text: string; tone: string };
+  runState(status: Status | null, rows: OutputInfo[]): { text: string; tone: string };
   outputState(
     status: OutputStatus | undefined,
     row: { enabled: boolean; muted: boolean },

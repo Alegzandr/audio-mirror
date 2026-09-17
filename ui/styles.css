@@ -428,14 +428,11 @@ main {
 }
 .output-detail:empty { display: none; }
 
-.output[data-enabled="false"] .output-controls,
-.output[data-absent="true"] .output-controls { display: none; }
+.output[data-enabled="false"] .output-controls { display: none; }
 
 .output[data-muted="true"] .fader { --fill-color: var(--text-3); }
 .output[data-muted="true"] .output-meter { opacity: 0.35; }
 .output[data-muted="true"] .output-db { color: var(--text-3); }
-
-.output[data-absent="true"] .output-name { color: var(--text-2); cursor: default; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }

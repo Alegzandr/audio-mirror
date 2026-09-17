@@ -111,27 +111,19 @@ const devices = {
 
 const config = (outputs, source = "desktop") => ({ source, outputs });
 
-test("the outputs that are here come first, in the order the system gave them", () => {
-  const rows = en.outputRows(devices, config([]));
-  assert.deepEqual([...rows].map((r) => r.id), ["a", "b"]);
-  assert.ok(!rows[0].absent);
-});
-
-test("an output that is on but unplugged is still shown, so it can be dropped", () => {
-  const rows = en.outputRows(devices, config([{ id: "gone", name: "Old DAC", enabled: true, fader: 1, muted: false }]));
-  assert.deepEqual([...rows].map((r) => r.id), ["a", "b", "gone"]);
-  assert.equal(rows[2].absent, true);
-  assert.equal(rows[2].name, "Old DAC");
-});
-
-test("an output that is off and unplugged is not shown at all", () => {
-  const rows = en.outputRows(devices, config([{ id: "gone", name: "Old DAC", enabled: false, fader: 1, muted: false }]));
+test("the outputs are the devices that are here, in the order the system gave them", () => {
+  const rows = en.outputRows(devices, config([], "input:mic"));
   assert.deepEqual([...rows].map((r) => r.id), ["a", "b"]);
 });
 
-test("an unplugged output the settings never named keeps a readable name", () => {
-  const rows = fr.outputRows(devices, config([{ id: "gone", name: "", enabled: true, fader: 1, muted: false }]));
-  assert.equal(rows[2].name, "Périphérique inconnu");
+test("the output the source records is not listed", () => {
+  assert.deepEqual([...en.outputRows(devices, config([], "desktop"))].map((r) => r.id), ["b"]);
+  assert.deepEqual([...en.outputRows(devices, config([], "output:b"))].map((r) => r.id), ["a"]);
+});
+
+test("an unplugged output is not listed, even when it is on", () => {
+  const rows = en.outputRows(devices, config([{ id: "gone", name: "Old DAC", enabled: true, fader: 1, muted: false }], "input:mic"));
+  assert.deepEqual([...rows].map((r) => r.id), ["a", "b"]);
 });
 
 test("the output the source records is the one that cannot be played into", () => {
@@ -143,17 +135,24 @@ test("the output the source records is the one that cannot be played into", () =
 /* The header. */
 
 test("the header says what the engine is doing", () => {
-  assert.deepEqual({ ...en.runState(null) }, { text: "Off", tone: "muted" });
-  assert.deepEqual({ ...en.runState(status({ running: false })) }, { text: "Off", tone: "muted" });
+  const rows = [{ id: "out", name: "Out", is_default: false }, { id: "b", name: "B", is_default: false }];
+  assert.deepEqual({ ...en.runState(null, rows) }, { text: "Off", tone: "muted" });
+  assert.deepEqual({ ...en.runState(status({ running: false }), rows) }, { text: "Off", tone: "muted" });
 
   const failing = status({ source: { state: "error", message: null, format: null, peak: 0 } });
-  assert.deepEqual({ ...en.runState(failing) }, { text: "Source unavailable", tone: "error" });
+  assert.deepEqual({ ...en.runState(failing, rows) }, { text: "Source unavailable", tone: "error" });
 
   const two = status({ outputs: [outputStatus(), outputStatus({ id: "b" })] });
-  assert.deepEqual({ ...en.runState(two) }, { text: "Mirroring to 2", tone: "on" });
+  assert.deepEqual({ ...en.runState(two, rows) }, { text: "Mirroring to 2", tone: "on" });
 
   const half = status({ outputs: [outputStatus(), outputStatus({ id: "b", state: "error" })] });
-  assert.deepEqual({ ...en.runState(half) }, { text: "1 of 2 playing", tone: "on" });
+  assert.deepEqual({ ...en.runState(half, rows) }, { text: "1 of 2 playing", tone: "on" });
+});
+
+test("the header only counts the outputs the list shows", () => {
+  const gone = status({ outputs: [outputStatus(), outputStatus({ id: "gone", state: "error" })] });
+  assert.deepEqual({ ...en.runState(gone, [{ id: "out", name: "Out", is_default: false }]) }, { text: "Mirroring to 1", tone: "on" });
+  assert.deepEqual({ ...en.runState(gone, []) }, { text: "Off", tone: "muted" });
 });
 
 /* One output row. */
