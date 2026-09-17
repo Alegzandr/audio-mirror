@@ -163,6 +163,7 @@
       },
       patterns: [
         [/^Unknown source (.*)$/s, "Source inconnue {1}"],
+        [/^Invalid device name (.*)$/s, "Nom de périphérique invalide {1}"],
         [/^Stream stopped with error (.*)$/s, "Flux arrêté avec l’erreur {1}"],
       ],
       colon: `${NNBSP}: `,

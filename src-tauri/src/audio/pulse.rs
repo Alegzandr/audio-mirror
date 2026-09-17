@@ -48,7 +48,7 @@ pub fn init_thread() {}
 pub fn watch_system(
     callback: Box<dyn Fn(SystemEvent) + Send + Sync>,
 ) -> Option<Box<dyn std::any::Any + Send + Sync>> {
-    let pulse = PulseLoop::new("Audio Mirror Watcher");
+    let pulse = PulseLoop::new(c"Audio Mirror Watcher");
     let default_sink = pulse.server_info().map(|d| d.default_sink);
     let data = Box::new(WatchData {
         callback,
@@ -201,7 +201,7 @@ extern "C" fn context_state_changed(_c: *mut pa_context, userdata: *mut c_void) 
 
 impl PulseLoop {
     /// `pulse_init` / `pulseaudio_init`.
-    fn new(context_name: &str) -> PulseLoop {
+    fn new(context_name: &CStr) -> PulseLoop {
         // SAFETY: straight port of the OBS wrapper initialization.
         unsafe {
             let mainloop = pa_threaded_mainloop_new();
@@ -209,18 +209,21 @@ impl PulseLoop {
 
             pa_threaded_mainloop_lock(mainloop);
             let props = pa_proplist_new();
-            let key = |k: &[u8]| CStr::from_bytes_with_nul(k).unwrap().as_ptr();
-            let app = CString::new("Audio Mirror").unwrap();
-            let icon = CString::new("audio-mirror").unwrap();
-            let role = CString::new("production").unwrap();
-            pa_proplist_sets(props, key(b"application.name\0"), app.as_ptr());
-            pa_proplist_sets(props, key(b"application.icon_name\0"), icon.as_ptr());
-            pa_proplist_sets(props, key(b"media.role\0"), role.as_ptr());
+            pa_proplist_sets(
+                props,
+                c"application.name".as_ptr(),
+                c"Audio Mirror".as_ptr(),
+            );
+            pa_proplist_sets(
+                props,
+                c"application.icon_name".as_ptr(),
+                c"audio-mirror".as_ptr(),
+            );
+            pa_proplist_sets(props, c"media.role".as_ptr(), c"production".as_ptr());
 
-            let name = CString::new(context_name).unwrap();
             let context = pa_context_new_with_proplist(
                 pa_threaded_mainloop_get_api(mainloop),
-                name.as_ptr(),
+                context_name.as_ptr(),
                 props,
             );
             pa_context_set_state_callback(
@@ -376,7 +379,7 @@ impl PulseLoop {
     /// `pulse_stream_new`.
     fn stream_new(
         &self,
-        name: &str,
+        name: &CStr,
         spec: &pa_sample_spec,
         map: &pa_channel_map,
     ) -> *mut pa_stream {
@@ -384,7 +387,6 @@ impl PulseLoop {
             return ptr::null_mut();
         }
         let _g = self.lock();
-        let name = CString::new(name).unwrap();
         // SAFETY: context used under the lock.
         unsafe {
             let props = pa_proplist_new();
@@ -398,13 +400,13 @@ impl PulseLoop {
 /// Capture side, `pulse-wrapper.c`.
 fn capture_loop() -> &'static PulseLoop {
     static LOOP: OnceLock<PulseLoop> = OnceLock::new();
-    LOOP.get_or_init(|| PulseLoop::new("Audio Mirror"))
+    LOOP.get_or_init(|| PulseLoop::new(c"Audio Mirror"))
 }
 
 /// Monitoring side, `pulseaudio-wrapper.c`.
 fn monitor_loop() -> &'static PulseLoop {
     static LOOP: OnceLock<PulseLoop> = OnceLock::new();
-    LOOP.get_or_init(|| PulseLoop::new("Audio Mirror Monitor"))
+    LOOP.get_or_init(|| PulseLoop::new(c"Audio Mirror Monitor"))
 }
 
 struct CallbackData<'a, T> {
@@ -667,6 +669,13 @@ fn resolve_source(source: &str, pulse: &PulseLoop) -> Result<(String, bool), Str
     }
 }
 
+/// A device name on its way to the C API. Names reach us from the settings
+/// file, so a malformed one is an error the panel can show, never a panic on
+/// the thread that owns every device.
+fn device_name(name: &str) -> Result<CString, String> {
+    CString::new(name).map_err(|_| format!("Invalid device name {name}"))
+}
+
 /// `devices_match` of the Pulse monitoring backend.
 fn devices_match(source_name: &str, sink: &str) -> bool {
     source_name == format!("{sink}{MONITOR_SUFFIX}")
@@ -758,6 +767,7 @@ extern "C" fn capture_state_changed(s: *mut pa_stream, userdata: *mut c_void) {
 pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
     let pulse = capture_loop();
     let (device, is_output) = resolve_source(source, pulse)?;
+    let device_c = device_name(&device)?;
     let is_default = source == DESKTOP;
 
     let info = pulse
@@ -787,9 +797,9 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
 
     let stream = pulse.stream_new(
         if is_output {
-            "Desktop Audio"
+            c"Desktop Audio"
         } else {
-            "Audio Input"
+            c"Audio Input"
         },
         &spec,
         &map,
@@ -817,8 +827,7 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
         if !is_default {
             flags |= PA_STREAM_DONT_MOVE;
         }
-        let dev = CString::new(device.as_str()).unwrap();
-        if pa_stream_connect_record(stream, dev.as_ptr(), &attr, flags) < 0 {
+        if pa_stream_connect_record(stream, device_c.as_ptr(), &attr, flags) < 0 {
             pa_stream_set_read_callback(stream, None, ptr::null_mut());
             pa_stream_set_state_callback(stream, None, ptr::null_mut());
             pa_stream_unref(stream);
@@ -905,6 +914,7 @@ pub fn create_monitor(
         }
     }
 
+    let device_c = device_name(device)?;
     let pulse = monitor_loop();
     pulse
         .server_info()
@@ -933,7 +943,7 @@ pub fn create_monitor(
         Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
 
     let map = channel_map(speakers);
-    let stream = pulse.stream_new("Audio Mirror", &spec, &map);
+    let stream = pulse.stream_new(c"Audio Mirror", &spec, &map);
     if stream.is_null() {
         return Err("Unable to create stream".into());
     }
@@ -954,12 +964,11 @@ pub fn create_monitor(
     }
     {
         let _g = pulse.lock();
-        let dev = CString::new(device).unwrap();
         // SAFETY: stream connected under the lock.
         let ret = unsafe {
             pa_stream_connect_playback(
                 stream,
-                dev.as_ptr(),
+                device_c.as_ptr(),
                 &attr,
                 flags,
                 ptr::null(),

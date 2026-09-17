@@ -29,6 +29,7 @@ use pulse as platform;
 use wasapi as platform;
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -53,6 +54,10 @@ pub const DESKTOP_NAME: &str = "Default output";
 /// reconnects a capture.
 const MONITOR_RETRY: Duration = Duration::from_secs(3);
 const TICK: Duration = Duration::from_millis(250);
+/// How many times the supervisor is put back on its feet after a panic. A
+/// panic there is a bug, not a device saying no, so the point is to keep the
+/// app answering long enough to be reported, not to spin on it forever.
+const PANIC_RESTARTS: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -85,8 +90,67 @@ pub struct DeviceList {
     pub outputs: Vec<OutputInfo>,
 }
 
+/// What a backend calls when the system says something changed.
+pub(crate) type EventCallback = Box<dyn Fn(SystemEvent) + Send + Sync>;
+
+/// The registration that keeps [`Platform::watch_system`] alive; dropping it
+/// unsubscribes.
+pub(crate) type Watcher = Option<Box<dyn std::any::Any + Send + Sync>>;
+
+/// The platform backend, behind a trait so the session and the supervisor
+/// can be exercised without audio devices.
+///
+/// Only the lifecycle crosses it: opening a capture, opening a monitor,
+/// listing devices. The audio itself never does, because a monitor is an
+/// [`AudioCallback`] the capture thread calls straight through an `Arc`, as
+/// `source_signal_audio_data` does in libobs. Nothing is added to the
+/// per-packet work.
+pub(crate) trait Platform: Send + Sync + 'static {
+    /// Prepares the calling thread, where the backend needs it (COM).
+    fn init_thread(&self);
+    fn enumerate(&self) -> Result<DeviceList, String>;
+    fn start_capture(&self, source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String>;
+    fn create_monitor(
+        &self,
+        source: &str,
+        device: &str,
+        shared: Arc<OutputShared>,
+    ) -> Result<MonitorInit, String>;
+    fn watch_system(&self, callback: EventCallback) -> Watcher;
+}
+
+/// The backend of the system this was built for.
+pub(crate) struct Native;
+
+impl Platform for Native {
+    fn init_thread(&self) {
+        platform::init_thread();
+    }
+
+    fn enumerate(&self) -> Result<DeviceList, String> {
+        platform::enumerate()
+    }
+
+    fn start_capture(&self, source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+        platform::start_capture(source, hub)
+    }
+
+    fn create_monitor(
+        &self,
+        source: &str,
+        device: &str,
+        shared: Arc<OutputShared>,
+    ) -> Result<MonitorInit, String> {
+        platform::create_monitor(source, device, shared)
+    }
+
+    fn watch_system(&self, callback: EventCallback) -> Watcher {
+        platform::watch_system(callback)
+    }
+}
+
 pub fn enumerate() -> Result<DeviceList, String> {
-    let mut list = platform::enumerate()?;
+    let mut list = Native.enumerate()?;
     // Name the device the default output currently points to.
     if let Some(current) = list.outputs.iter().find(|o| o.is_default) {
         let name = format!("{DESKTOP_NAME} ({})", current.name);
@@ -223,11 +287,26 @@ pub struct Engine {
     thread: Option<JoinHandle<()>>,
     status: Arc<Mutex<Status>>,
     shared: SharedMap,
-    _watcher: Option<Box<dyn std::any::Any + Send + Sync>>,
+    _watcher: Watcher,
 }
 
 impl Engine {
     pub fn new() -> Self {
+        Self::with_platform(Arc::new(Native))
+    }
+
+    pub(crate) fn with_platform(platform: Arc<dyn Platform>) -> Self {
+        Self::build(platform, MONITOR_RETRY)
+    }
+
+    /// Same engine with a shorter retry delay, so the tests do not wait the
+    /// three seconds the product does.
+    #[cfg(test)]
+    pub(crate) fn with_retry(platform: Arc<dyn Platform>, retry: Duration) -> Self {
+        Self::build(platform, retry)
+    }
+
+    fn build(platform: Arc<dyn Platform>, retry: Duration) -> Self {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(Status::default()));
         let shared = SharedMap::default();
@@ -236,16 +315,18 @@ impl Engine {
             rx,
             status: status.clone(),
             shared: shared.clone(),
+            platform: platform.clone(),
+            retry,
             cfg: None,
             session: None,
         };
         let thread = std::thread::Builder::new()
             .name("audio-supervisor".into())
-            .spawn(move || sup.run())
+            .spawn(move || sup.run_guarded())
             .expect("failed to start the audio supervisor");
 
         let events = tx.clone();
-        let watcher = platform::watch_system(Box::new(move |event| {
+        let watcher = platform.watch_system(Box::new(move |event| {
             let _ = events.send(Cmd::System(event));
         }));
 
@@ -342,6 +423,8 @@ enum Slot {
 
 /// One source and its monitors, like an `obs_source_t` with monitoring on.
 struct Session {
+    platform: Arc<dyn Platform>,
+    retry: Duration,
     source: String,
     hub: Arc<SourceHub>,
     capture: Result<Box<dyn Capture>, String>,
@@ -350,17 +433,19 @@ struct Session {
 }
 
 impl Session {
-    fn start(source: &str) -> Session {
+    fn start(platform: Arc<dyn Platform>, retry: Duration, source: &str) -> Session {
         let hub = Arc::new(SourceHub::new());
-        let capture = platform::start_capture(source, hub.clone());
+        let capture = platform.start_capture(source, hub.clone());
         if let Err(e) = &capture {
             log::warn!("capture: {e}");
         }
         Session {
+            platform,
+            retry,
             source: source.to_string(),
             hub,
             capture,
-            capture_retry_at: Instant::now() + MONITOR_RETRY,
+            capture_retry_at: Instant::now() + retry,
             slots: HashMap::new(),
         }
     }
@@ -368,11 +453,11 @@ impl Session {
     fn reopen_capture(&mut self) {
         // Drop the old capture before opening the device again.
         self.capture = Err(String::new());
-        self.capture = platform::start_capture(&self.source, self.hub.clone());
+        self.capture = self.platform.start_capture(&self.source, self.hub.clone());
         if let Err(e) = &self.capture {
             log::warn!("capture: {e}");
         }
-        self.capture_retry_at = Instant::now() + MONITOR_RETRY;
+        self.capture_retry_at = Instant::now() + self.retry;
     }
 
     /// `audio_monitor_create`. A monitor already on that output is destroyed
@@ -380,7 +465,7 @@ impl Session {
     /// again: a driver that only accepts one client can still be rebuilt.
     fn create_monitor(&mut self, id: &str, shared: Arc<OutputShared>) {
         self.remove_monitor(id);
-        let slot = match platform::create_monitor(&self.source, id, shared) {
+        let slot = match self.platform.create_monitor(&self.source, id, shared) {
             Ok(MonitorInit::Active(monitor)) => {
                 let callback = self.hub.add_callback(monitor.clone());
                 Slot::Active {
@@ -397,7 +482,7 @@ impl Session {
                 log::warn!("monitor {id}: {error}");
                 Slot::Failed {
                     error,
-                    retry_at: Instant::now() + MONITOR_RETRY,
+                    retry_at: Instant::now() + self.retry,
                 }
             }
         };
@@ -424,13 +509,13 @@ impl Drop for Session {
 /// Whether a slot must be built again now: a device that could not be opened
 /// and is due for a retry, or a monitor that has been reporting a failure for
 /// a full retry delay.
-fn slot_is_due(slot: &Slot, now: Instant) -> bool {
+fn slot_is_due(slot: &Slot, now: Instant, retry: Duration) -> bool {
     match slot {
         Slot::Failed { retry_at, .. } => now >= *retry_at,
         Slot::Active {
             failing_since: Some(since),
             ..
-        } => now >= *since + MONITOR_RETRY,
+        } => now >= *since + retry,
         _ => false,
     }
 }
@@ -439,13 +524,54 @@ struct Supervisor {
     rx: Receiver<Cmd>,
     status: Arc<Mutex<Status>>,
     shared: SharedMap,
+    platform: Arc<dyn Platform>,
+    /// How long a failed capture or monitor waits before being opened again.
+    retry: Duration,
     cfg: Option<EngineConfig>,
     session: Option<Session>,
 }
 
 impl Supervisor {
-    fn run(mut self) {
-        platform::init_thread();
+    /// Runs the loop, and keeps the engine answering if it ever panics.
+    ///
+    /// The supervisor owns the capture and every monitor, so letting a panic
+    /// unwind out of this thread would leave the app silent in the worst
+    /// way: the command channel closed, every click on the panel dropped on
+    /// the floor, and the status frozen on whatever was published last. The
+    /// session is thrown away instead and opened again from the
+    /// configuration. The locks around the status and the per-output
+    /// controls are `parking_lot`'s, which do not poison, so they are still
+    /// usable on the way out of the unwind.
+    ///
+    /// This needs unwinding to work: under a `panic = "abort"` profile it is
+    /// dead code, which is a fair trade rather than a reason to leave the
+    /// thread unguarded.
+    fn run_guarded(mut self) {
+        for _ in 0..=PANIC_RESTARTS {
+            let clean = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                // Whatever a panic left half built is dropped in here, so a
+                // device handle that panics on close is caught as well.
+                self.session = None;
+                self.run();
+            }));
+            if clean.is_ok() {
+                return;
+            }
+            log::error!("audio supervisor panicked, opening the devices again");
+        }
+        log::error!("audio supervisor gave up after {PANIC_RESTARTS} panics");
+        *self.status.lock() = Status::default();
+    }
+
+    fn run(&mut self) {
+        self.platform.init_thread();
+        // Nothing is open after a panic: build the session again before
+        // going back to waiting for commands.
+        if self.session.is_none() {
+            if let Some(cfg) = self.cfg.clone() {
+                self.apply(cfg);
+            }
+        }
         loop {
             match self.rx.recv_timeout(TICK) {
                 Ok(Cmd::Apply(cfg)) => self.apply(cfg),
@@ -479,13 +605,26 @@ impl Supervisor {
             return;
         }
 
+        // What the user asked for is recorded before anything is opened, so
+        // a backend that panics half way through does not also lose it.
+        self.cfg = Some(cfg.clone());
+
         let restart = self.session.as_ref().is_none_or(|s| s.source != cfg.source);
         if restart {
             self.session = None;
-            self.session = Some(Session::start(&cfg.source));
+            self.session = Some(Session::start(
+                self.platform.clone(),
+                self.retry,
+                &cfg.source,
+            ));
         }
 
-        let session = self.session.as_mut().expect("session");
+        // `restart` just put one there, so this always binds. Taking the
+        // branch instead of unwrapping keeps the thread that owns every
+        // device free of reachable panics.
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
         let stale: Vec<String> = session
             .slots
             .keys()
@@ -503,7 +642,6 @@ impl Supervisor {
                 session.create_monitor(&o.id, shared);
             }
         }
-        self.cfg = Some(cfg);
     }
 
     fn system(&mut self, event: SystemEvent) {
@@ -551,7 +689,7 @@ impl Supervisor {
             Err(_) => true,
         };
         if !failed {
-            session.capture_retry_at = now + MONITOR_RETRY;
+            session.capture_retry_at = now + self.retry;
         } else if now >= session.capture_retry_at {
             session.reopen_capture();
         }
@@ -578,7 +716,7 @@ impl Supervisor {
         let due: Vec<String> = session
             .slots
             .iter()
-            .filter(|(_, slot)| slot_is_due(slot, now))
+            .filter(|(_, slot)| slot_is_due(slot, now, self.retry))
             .map(|(id, _)| id.clone())
             .collect();
         for id in due {
@@ -673,7 +811,23 @@ mod tests {
         assert_eq!(describe(44_100, 6), "44.1 kHz, 5.1");
     }
 
-    struct FakeMonitor(MonitorState);
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A monitor whose reported state the test drives.
+    struct FakeMonitor(Mutex<MonitorState>);
+
+    impl FakeMonitor {
+        fn playing() -> Arc<FakeMonitor> {
+            Arc::new(FakeMonitor(Mutex::new(MonitorState::Playing {
+                format: "48 kHz, stereo".into(),
+            })))
+        }
+
+        fn lose_device(&self) {
+            *self.0.lock() = MonitorState::Reconnecting("Device disconnected".into());
+        }
+    }
 
     impl hub::AudioCallback for FakeMonitor {
         fn on_audio(&self, _audio: &format::ObsAudio) {}
@@ -681,16 +835,323 @@ mod tests {
 
     impl Monitor for FakeMonitor {
         fn state(&self) -> MonitorState {
-            self.0.clone()
+            self.0.lock().clone()
         }
     }
 
     fn active_slot(failing_since: Option<Instant>) -> Slot {
+        let monitor = FakeMonitor::playing();
+        monitor.lose_device();
         Slot::Active {
-            monitor: Arc::new(FakeMonitor(MonitorState::Reconnecting("gone".into()))),
+            monitor,
             callback: 1,
             failing_since,
         }
+    }
+
+    /// A capture whose reported state the test drives.
+    struct FakeCapture {
+        state: Mutex<CaptureState>,
+        follows_default: bool,
+    }
+
+    struct FakeCaptureHandle(Arc<FakeCapture>);
+
+    impl Capture for FakeCaptureHandle {
+        fn state(&self) -> CaptureState {
+            self.0.state.lock().clone()
+        }
+
+        fn default_output_changed(&self) -> bool {
+            self.0.follows_default
+        }
+    }
+
+    /// A backend with no audio hardware, scripted by the test.
+    #[derive(Default)]
+    struct FakePlatform {
+        /// Devices whose monitor refuses to open, and why.
+        refusing: Mutex<HashMap<String, String>>,
+        /// Devices the source records, so they come back `Ignored`.
+        captured: Mutex<HashSet<String>>,
+        /// Every monitor handed out, in order, so rebuilds can be counted.
+        built: Mutex<Vec<String>>,
+        live: Mutex<HashMap<String, Arc<FakeMonitor>>>,
+        capture: Mutex<Option<Arc<FakeCapture>>>,
+        captures_started: AtomicUsize,
+        /// Monitors left to blow up on, to stand in for a bug in a backend.
+        panics_left: AtomicUsize,
+        follows_default: Mutex<bool>,
+        events: Mutex<Option<EventCallback>>,
+    }
+
+    impl FakePlatform {
+        fn refuse(&self, device: &str, why: &str) {
+            self.refusing.lock().insert(device.into(), why.into());
+        }
+
+        fn accept(&self, device: &str) {
+            self.refusing.lock().remove(device);
+        }
+
+        fn built(&self, device: &str) -> usize {
+            self.built.lock().iter().filter(|d| *d == device).count()
+        }
+
+        /// The monitor currently playing on that device.
+        fn monitor(&self, device: &str) -> Arc<FakeMonitor> {
+            self.live.lock()[device].clone()
+        }
+
+        fn captures_started(&self) -> usize {
+            self.captures_started.load(Ordering::Relaxed)
+        }
+
+        fn fire(&self, event: SystemEvent) {
+            if let Some(callback) = self.events.lock().as_ref() {
+                callback(event);
+            }
+        }
+    }
+
+    impl Platform for FakePlatform {
+        fn init_thread(&self) {}
+
+        fn enumerate(&self) -> Result<DeviceList, String> {
+            Ok(DeviceList::default())
+        }
+
+        fn start_capture(
+            &self,
+            _source: &str,
+            _hub: Arc<SourceHub>,
+        ) -> Result<Box<dyn Capture>, String> {
+            self.captures_started.fetch_add(1, Ordering::Relaxed);
+            let capture = Arc::new(FakeCapture {
+                state: Mutex::new(CaptureState::Active {
+                    format: "48 kHz, stereo".into(),
+                }),
+                follows_default: *self.follows_default.lock(),
+            });
+            *self.capture.lock() = Some(capture.clone());
+            Ok(Box::new(FakeCaptureHandle(capture)))
+        }
+
+        fn create_monitor(
+            &self,
+            _source: &str,
+            device: &str,
+            _shared: Arc<OutputShared>,
+        ) -> Result<MonitorInit, String> {
+            self.built.lock().push(device.to_string());
+            if self
+                .panics_left
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                panic!("a backend blew up");
+            }
+            if self.captured.lock().contains(device) {
+                return Ok(MonitorInit::Ignored);
+            }
+            if let Some(why) = self.refusing.lock().get(device) {
+                return Err(why.clone());
+            }
+            let monitor = FakeMonitor::playing();
+            self.live.lock().insert(device.to_string(), monitor.clone());
+            Ok(MonitorInit::Active(monitor))
+        }
+
+        fn watch_system(&self, callback: EventCallback) -> Watcher {
+            *self.events.lock() = Some(callback);
+            None
+        }
+    }
+
+    /// Retry delay for the tests: long enough not to race the 250 ms tick
+    /// being irrelevant here, short enough to keep the suite quick.
+    const TEST_RETRY: Duration = Duration::from_millis(60);
+
+    /// Polls until `done` holds, so the tests do not depend on how long a
+    /// supervisor tick takes.
+    #[track_caller]
+    fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if done() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    fn one_output(id: &str) -> EngineConfig {
+        EngineConfig {
+            source: "input:fake".into(),
+            outputs: vec![OutputSpec {
+                id: id.into(),
+                gain: 1.0,
+                muted: false,
+            }],
+        }
+    }
+
+    fn output_state(engine: &Engine, id: &str) -> Option<NodeState> {
+        engine
+            .status()
+            .outputs
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| o.state.clone())
+    }
+
+    #[test]
+    fn a_monitor_whose_device_dies_is_rebuilt_and_plays_again() {
+        let fake = Arc::new(FakePlatform::default());
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+        engine.apply(one_output("out"));
+
+        eventually("the output to play", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+        assert_eq!(fake.built("out"), 1);
+
+        // The device goes away under a monitor that was playing: the panel
+        // has to say so, and the session has to open it again.
+        fake.monitor("out").lose_device();
+        eventually("the loss to show", || {
+            output_state(&engine, "out") == Some(NodeState::Error)
+        });
+        eventually("the monitor to be rebuilt", || fake.built("out") >= 2);
+        eventually("the output to play again", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+    }
+
+    #[test]
+    fn an_output_that_cannot_be_opened_is_retried_until_it_works() {
+        let fake = Arc::new(FakePlatform::default());
+        fake.refuse("out", "Device unavailable");
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+        engine.apply(one_output("out"));
+
+        eventually("the failure to show", || {
+            output_state(&engine, "out") == Some(NodeState::Error)
+        });
+        let message = engine.status().outputs[0].message.clone();
+        assert_eq!(message.as_deref(), Some("Device unavailable"));
+
+        eventually("a retry", || fake.built("out") >= 2);
+        fake.accept("out");
+        eventually("the output to come back", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+    }
+
+    #[test]
+    fn the_output_the_source_records_is_left_alone() {
+        let fake = Arc::new(FakePlatform::default());
+        fake.captured.lock().insert("out".into());
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+        engine.apply(one_output("out"));
+
+        eventually("the output to be skipped", || {
+            output_state(&engine, "out") == Some(NodeState::Blocked)
+        });
+        // `OBS_SOURCE_DO_NOT_SELF_MONITOR` is not a failure: never retried.
+        std::thread::sleep(TEST_RETRY * 5);
+        assert_eq!(fake.built("out"), 1);
+        assert_eq!(output_state(&engine, "out"), Some(NodeState::Blocked));
+    }
+
+    #[test]
+    fn a_capture_that_stopped_is_opened_again() {
+        let fake = Arc::new(FakePlatform::default());
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+        engine.apply(one_output("out"));
+
+        eventually("the capture to start", || fake.captures_started() == 1);
+        eventually("the source to play", || {
+            engine.status().source.state == NodeState::Playing
+        });
+
+        *fake.capture.lock().as_ref().unwrap().state.lock() =
+            CaptureState::Failed("Device disconnected".into());
+        eventually("the capture to be reopened", || {
+            fake.captures_started() >= 2
+        });
+        eventually("the source to play again", || {
+            engine.status().source.state == NodeState::Playing
+        });
+    }
+
+    #[test]
+    fn a_default_output_change_rebuilds_every_monitor() {
+        let fake = Arc::new(FakePlatform::default());
+        *fake.follows_default.lock() = true;
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+        engine.apply(one_output("out"));
+        eventually("the output to play", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+
+        // `obs_reset_audio_monitoring`: the capture follows the new default
+        // and every monitor is built again, which re-runs the feedback rule.
+        fake.fire(SystemEvent::DefaultOutputChanged);
+        eventually("the capture to follow", || fake.captures_started() >= 2);
+        eventually("the monitors to be rebuilt", || fake.built("out") >= 2);
+    }
+
+    /// Prints a panic and its backtrace on stderr, which is expected here.
+    #[test]
+    fn a_panic_in_the_supervisor_does_not_take_the_engine_down() {
+        let fake = Arc::new(FakePlatform::default());
+        fake.panics_left.store(1, Ordering::Relaxed);
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+        engine.apply(one_output("out"));
+
+        // The devices are opened again and the output ends up playing.
+        eventually("the engine to come back", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+
+        // And the engine still takes commands, which is what would be lost
+        // if the panic had ended the thread.
+        engine.apply(EngineConfig {
+            source: "input:fake".into(),
+            outputs: vec![],
+        });
+        eventually("the engine to stop", || !engine.status().running);
+    }
+
+    #[test]
+    fn an_output_switched_off_is_dropped_but_the_others_keep_playing() {
+        let fake = Arc::new(FakePlatform::default());
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+        let mut cfg = one_output("keep");
+        cfg.outputs.push(OutputSpec {
+            id: "drop".into(),
+            gain: 1.0,
+            muted: false,
+        });
+        engine.apply(cfg);
+        eventually("both outputs to play", || {
+            output_state(&engine, "keep") == Some(NodeState::Playing)
+                && output_state(&engine, "drop") == Some(NodeState::Playing)
+        });
+
+        engine.apply(one_output("keep"));
+        eventually("the output to be dropped", || {
+            output_state(&engine, "drop").is_none()
+        });
+        assert_eq!(output_state(&engine, "keep"), Some(NodeState::Playing));
+        assert_eq!(
+            fake.built("keep"),
+            1,
+            "the output that stayed on is not rebuilt"
+        );
+        assert!(!engine.shared.lock().contains_key("drop"));
     }
 
     #[test]
@@ -702,21 +1163,34 @@ mod tests {
             error: "nope".into(),
             retry_at: now + MONITOR_RETRY,
         };
-        assert!(!slot_is_due(&failed, now));
-        assert!(slot_is_due(&failed, now + MONITOR_RETRY));
+        assert!(!slot_is_due(&failed, now, MONITOR_RETRY));
+        assert!(slot_is_due(&failed, now + MONITOR_RETRY, MONITOR_RETRY));
 
         // A monitor that reports a failure is left alone until the retry
         // delay has passed: backends that heal on their own get their chance.
-        assert!(!slot_is_due(&active_slot(None), now + MONITOR_RETRY * 10));
-        assert!(!slot_is_due(&active_slot(Some(now)), now));
+        assert!(!slot_is_due(
+            &active_slot(None),
+            now + MONITOR_RETRY * 10,
+            MONITOR_RETRY
+        ));
+        assert!(!slot_is_due(&active_slot(Some(now)), now, MONITOR_RETRY));
         assert!(!slot_is_due(
             &active_slot(Some(now)),
-            now + MONITOR_RETRY - Duration::from_millis(1)
+            now + MONITOR_RETRY - Duration::from_millis(1),
+            MONITOR_RETRY
         ));
-        assert!(slot_is_due(&active_slot(Some(now)), now + MONITOR_RETRY));
+        assert!(slot_is_due(
+            &active_slot(Some(now)),
+            now + MONITOR_RETRY,
+            MONITOR_RETRY
+        ));
 
         // An output left out on purpose is never rebuilt.
-        assert!(!slot_is_due(&Slot::Ignored, now + MONITOR_RETRY * 10));
+        assert!(!slot_is_due(
+            &Slot::Ignored,
+            now + MONITOR_RETRY * 10,
+            MONITOR_RETRY
+        ));
     }
 
     #[test]
