@@ -878,7 +878,6 @@ struct MonitorStream {
     bytes_per_frame: usize,
     new_data: VecDeque<u8>,
     resampler: Resampler,
-    scratch: Vec<u8>,
 }
 
 // SAFETY: the stream is only touched under the monitor mainloop lock.
@@ -998,7 +997,6 @@ pub fn create_monitor(
             bytes_per_frame: unsafe { pa_frame_size(&spec) },
             new_data: VecDeque::new(),
             resampler,
-            scratch: Vec::new(),
         }),
         format: describe(info.rate, info.channels as usize),
     })))
@@ -1014,8 +1012,17 @@ impl PulseMonitor {
 
         // SAFETY: stream used under the monitor mainloop lock.
         unsafe {
-            // Grow the Pulse buffer when a large backlog built up.
+            // Grow the Pulse buffer when a large backlog built up. It is
+            // never shrunk back, exactly as in `do_stream_write`, so the
+            // added latency stays until the monitor is built again. Worth a
+            // line in the log, because nothing else says it happened.
             if data.new_data.len() > data.attr.tlength as usize * 2 {
+                log::info!(
+                    "'{}': buffer grown from {} to {} bytes, latency follows",
+                    self.device,
+                    data.attr.tlength,
+                    data.new_data.len()
+                );
                 data.attr.fragsize = u32::MAX;
                 data.attr.maxlength = u32::MAX;
                 data.attr.prebuf = u32::MAX;
@@ -1051,9 +1058,13 @@ impl PulseMonitor {
                     return;
                 }
                 let out = std::slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_fill);
-                for (dst, src) in out.iter_mut().zip(data.new_data.drain(..bytes_to_fill)) {
-                    *dst = src;
-                }
+                // A ring buffer is at most two runs, so this is two memcpy
+                // rather than a branch per byte, inside the write callback.
+                let (front, back) = data.new_data.as_slices();
+                let head = front.len().min(bytes_to_fill);
+                out[..head].copy_from_slice(&front[..head]);
+                out[head..].copy_from_slice(&back[..bytes_to_fill - head]);
+                data.new_data.drain(..bytes_to_fill);
                 pa_stream_write(
                     data.stream,
                     buffer,
@@ -1078,13 +1089,15 @@ impl AudioCallback for PulseMonitor {
             if let Some(frames) = data.resampler.resample(&input, audio.frames) {
                 let bytes = data.bytes_per_frame * frames as usize;
                 let vol = self.shared.volume();
+                // Disjoint fields, so the samples are scaled in place and
+                // handed over without the round trip through a scratch copy.
                 let data = &mut *data;
-                data.scratch.clear();
-                data.scratch
-                    .extend_from_slice(&data.resampler.plane(0)[..bytes]);
-                let samples = &mut data.scratch[..];
-                match data.format {
+                let format = data.format;
+                let samples = &mut data.resampler.plane_mut(0)[..bytes];
+                match format {
                     PA_SAMPLE_FLOAT32LE => {
+                        // SAFETY: the resampler hands out planes aligned for
+                        // `f32`, so this covers all of them.
                         let (_, floats, _) = unsafe { samples.align_to_mut::<f32>() };
                         self.shared.apply_f32(floats, vol);
                     }
@@ -1093,7 +1106,7 @@ impl AudioCallback for PulseMonitor {
                     PA_SAMPLE_S32LE => self.shared.record_peak(scale_s32(samples, vol)),
                     _ => {}
                 }
-                data.new_data.extend(data.scratch.iter().copied());
+                data.new_data.extend(samples.iter().copied());
             }
         }
         self.stream_write();
