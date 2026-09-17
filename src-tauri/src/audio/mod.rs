@@ -410,6 +410,10 @@ enum Slot {
     Active {
         monitor: Arc<dyn Monitor>,
         callback: CallbackId,
+        /// Refreshed once per tick and read from there afterwards. Asking a
+        /// monitor twice for the same answer costs a device query on macOS,
+        /// where the state is read back from the hardware.
+        state: MonitorState,
         /// Since when the monitor has been reporting a failed device, so a
         /// backend that cannot reopen it on its own still gets rebuilt.
         failing_since: Option<Instant>,
@@ -428,6 +432,9 @@ struct Session {
     source: String,
     hub: Arc<SourceHub>,
     capture: Result<Box<dyn Capture>, String>,
+    /// Refreshed once per tick and read from there afterwards, like a
+    /// monitor's, so one pass never asks the same backend twice.
+    capture_state: CaptureState,
     capture_retry_at: Instant,
     slots: HashMap<String, Slot>,
 }
@@ -439,14 +446,26 @@ impl Session {
         if let Err(e) = &capture {
             log::warn!("capture: {e}");
         }
-        Session {
+        let mut session = Session {
             platform,
             retry,
             source: source.to_string(),
             hub,
             capture,
+            capture_state: CaptureState::Starting,
             capture_retry_at: Instant::now() + retry,
             slots: HashMap::new(),
+        };
+        session.capture_state = session.read_capture_state();
+        session
+    }
+
+    /// A capture that could not be opened at all reads as one that stopped,
+    /// so there is a single shape for the tick and the panel to look at.
+    fn read_capture_state(&self) -> CaptureState {
+        match &self.capture {
+            Ok(capture) => capture.state(),
+            Err(e) => CaptureState::Failed(e.clone()),
         }
     }
 
@@ -457,6 +476,7 @@ impl Session {
         if let Err(e) = &self.capture {
             log::warn!("capture: {e}");
         }
+        self.capture_state = self.read_capture_state();
         self.capture_retry_at = Instant::now() + self.retry;
     }
 
@@ -469,6 +489,7 @@ impl Session {
             Ok(MonitorInit::Active(monitor)) => {
                 let callback = self.hub.add_callback(monitor.clone());
                 Slot::Active {
+                    state: monitor.state(),
                     monitor,
                     callback,
                     failing_since: None,
@@ -668,12 +689,33 @@ impl Supervisor {
                 }
             }
             SystemEvent::DevicesChanged => {
+                // A device that just came back is opened on the next tick
+                // rather than at the end of the retry delay, whether the
+                // output never opened or is open and reporting a dead
+                // device.
+                let retry = self.retry;
+                let now = Instant::now();
                 for slot in session.slots.values_mut() {
-                    if let Slot::Failed { retry_at, .. } = slot {
-                        *retry_at = Instant::now();
+                    match slot {
+                        Slot::Failed { retry_at, .. } => *retry_at = now,
+                        Slot::Active {
+                            monitor,
+                            state,
+                            failing_since,
+                            ..
+                        } => {
+                            // Read here rather than trusting the last tick,
+                            // so the event works whichever of the two
+                            // noticed the device first.
+                            *state = monitor.state();
+                            if matches!(state, MonitorState::Reconnecting(_)) {
+                                *failing_since = now.checked_sub(retry).or(*failing_since);
+                            }
+                        }
+                        Slot::Ignored => {}
                     }
                 }
-                session.capture_retry_at = Instant::now();
+                session.capture_retry_at = now;
             }
         }
     }
@@ -684,10 +726,9 @@ impl Supervisor {
         };
         let now = Instant::now();
 
-        let failed = match &session.capture {
-            Ok(capture) => matches!(capture.state(), CaptureState::Failed(_)),
-            Err(_) => true,
-        };
+        let state = session.read_capture_state();
+        session.capture_state = state;
+        let failed = matches!(session.capture_state, CaptureState::Failed(_));
         if !failed {
             session.capture_retry_at = now + self.retry;
         } else if now >= session.capture_retry_at {
@@ -701,11 +742,13 @@ impl Supervisor {
         for slot in session.slots.values_mut() {
             if let Slot::Active {
                 monitor,
+                state,
                 failing_since,
                 ..
             } = slot
             {
-                if matches!(monitor.state(), MonitorState::Reconnecting(_)) {
+                *state = monitor.state();
+                if matches!(state, MonitorState::Reconnecting(_)) {
                     failing_since.get_or_insert(now);
                 } else {
                     *failing_since = None;
@@ -736,15 +779,14 @@ impl Supervisor {
         };
         st.running = true;
 
-        let (state, message, format) = match &session.capture {
-            Ok(capture) => match capture.state() {
-                CaptureState::Starting => (NodeState::Starting, None, None),
-                CaptureState::Active { format } => (NodeState::Playing, None, Some(format)),
-                CaptureState::Retrying(msg) | CaptureState::Failed(msg) => {
-                    (NodeState::Error, Some(msg), None)
-                }
-            },
-            Err(e) => (NodeState::Error, Some(e.clone()), None),
+        // Read as of this tick, so the backend is not queried again just to
+        // fill the panel.
+        let (state, message, format) = match &session.capture_state {
+            CaptureState::Starting => (NodeState::Starting, None, None),
+            CaptureState::Active { format } => (NodeState::Playing, None, Some(format.clone())),
+            CaptureState::Retrying(msg) | CaptureState::Failed(msg) => {
+                (NodeState::Error, Some(msg.clone()), None)
+            }
         };
         st.source = SourceStatus {
             state,
@@ -758,11 +800,15 @@ impl Supervisor {
             .iter()
             .map(|o| {
                 let (state, message, format) = match session.slots.get(&o.id) {
-                    Some(Slot::Active { monitor, .. }) => match monitor.state() {
+                    // Read as of this tick, so the backend is not queried
+                    // again just to fill the panel.
+                    Some(Slot::Active { state, .. }) => match state {
                         MonitorState::Playing { format } => {
-                            (NodeState::Playing, None, Some(format))
+                            (NodeState::Playing, None, Some(format.clone()))
                         }
-                        MonitorState::Reconnecting(msg) => (NodeState::Error, Some(msg), None),
+                        MonitorState::Reconnecting(msg) => {
+                            (NodeState::Error, Some(msg.clone()), None)
+                        }
                     },
                     Some(Slot::Ignored) => (
                         NodeState::Blocked,
@@ -843,6 +889,7 @@ mod tests {
         let monitor = FakeMonitor::playing();
         monitor.lose_device();
         Slot::Active {
+            state: monitor.state(),
             monitor,
             callback: 1,
             failing_since,
@@ -976,7 +1023,10 @@ mod tests {
     /// supervisor tick takes.
     #[track_caller]
     fn eventually(what: &str, mut done: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Only reached when something is actually wrong, so a generous
+        // deadline costs nothing and keeps a loaded runner from failing a
+        // test that would have passed.
+        let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             if done() {
                 return;
@@ -1083,6 +1133,54 @@ mod tests {
         });
         eventually("the source to play again", || {
             engine.status().source.state == NodeState::Playing
+        });
+    }
+
+    #[test]
+    fn a_device_coming_back_is_opened_without_waiting_for_the_retry() {
+        // Long enough that a rebuild inside it can only come from the event.
+        const SLOW: Duration = Duration::from_secs(30);
+
+        let fake = Arc::new(FakePlatform::default());
+        fake.refuse("out", "Device unavailable");
+        let engine = Engine::with_retry(fake.clone(), SLOW);
+        engine.apply(one_output("out"));
+        eventually("the failure to show", || {
+            output_state(&engine, "out") == Some(NodeState::Error)
+        });
+        assert_eq!(fake.built("out"), 1);
+
+        fake.accept("out");
+        fake.fire(SystemEvent::DevicesChanged);
+        eventually("the output to come back", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+    }
+
+    #[test]
+    fn a_device_coming_back_under_a_failing_monitor_is_opened_at_once() {
+        const SLOW: Duration = Duration::from_secs(30);
+
+        let fake = Arc::new(FakePlatform::default());
+        let engine = Engine::with_retry(fake.clone(), SLOW);
+        engine.apply(one_output("out"));
+        eventually("the output to play", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+
+        // Unplugged: the monitor is still there, saying the device is gone.
+        fake.monitor("out").lose_device();
+        eventually("the loss to show", || {
+            output_state(&engine, "out") == Some(NodeState::Error)
+        });
+        assert_eq!(fake.built("out"), 1, "the retry delay has not elapsed");
+
+        // Plugged back in: the panel should not sit on an error for the rest
+        // of the delay when the system already said the devices changed.
+        fake.fire(SystemEvent::DevicesChanged);
+        eventually("the monitor to be rebuilt", || fake.built("out") >= 2);
+        eventually("the output to play again", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
         });
     }
 
