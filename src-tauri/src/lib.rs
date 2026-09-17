@@ -22,6 +22,8 @@ const AUTOSTART_ARG: &str = "--autostart";
 
 pub(crate) struct AppState {
     config: Mutex<AppConfig>,
+    /// Held while the settings are written, see [`AppState::change`].
+    writing: Mutex<()>,
     path: PathBuf,
     engine: Engine,
     pub(crate) lang: Lang,
@@ -30,17 +32,33 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    fn save(&self, cfg: &AppConfig) -> Result<(), String> {
-        cfg.save(&self.path).map_err(|e| e.to_string())
+    /// Changes the settings, writes them, and hands `apply` the result.
+    ///
+    /// The file is written with the settings unlocked, so the panel reading
+    /// them, a volume going to the audio thread, and the next command do not
+    /// queue behind a disk that answers slowly, which a roaming or networked
+    /// profile directory does. `writing` takes the place of that lock for
+    /// the writers alone: it is taken first and held across the write, so
+    /// two changes reach the file in the order they were made.
+    fn change<T>(
+        &self,
+        f: impl FnOnce(&mut AppConfig) -> T,
+        apply: impl FnOnce(&AppConfig, T),
+    ) -> Result<(), String> {
+        let _writing = self.writing.lock();
+        let (cfg, value) = {
+            let mut cfg = self.config.lock();
+            let value = f(&mut cfg);
+            (cfg.clone(), value)
+        };
+        cfg.save(&self.path).map_err(|e| e.to_string())?;
+        apply(&cfg, value);
+        Ok(())
     }
 
     /// Applies a change, saves it and pushes it to the engine.
     fn update(&self, f: impl FnOnce(&mut AppConfig)) -> Result<(), String> {
-        let mut cfg = self.config.lock();
-        f(&mut cfg);
-        self.save(&cfg)?;
-        self.engine.apply(cfg.engine_config());
-        Ok(())
+        self.change(f, |cfg, ()| self.engine.apply(cfg.engine_config()))
     }
 }
 
@@ -103,15 +121,16 @@ fn set_output_volume(
     };
     // Volume goes straight to the audio thread, the stream is not rebuilt.
     // While the slider moves, only the final position is written to disk.
-    let mut cfg = state.config.lock();
-    cfg.output_mut(&id, &name).fader = fader;
-    if persist {
-        state.save(&cfg)?;
+    let gain = audio::volume::fader_to_gain(fader);
+    if !persist {
+        state.config.lock().output_mut(&id, &name).fader = fader;
+        state.engine.set_gain(&id, gain);
+        return Ok(());
     }
-    state
-        .engine
-        .set_gain(&id, audio::volume::fader_to_gain(fader));
-    Ok(())
+    state.change(
+        |c| c.output_mut(&id, &name).fader = fader,
+        |_, ()| state.engine.set_gain(&id, gain),
+    )
 }
 
 #[tauri::command]
@@ -121,11 +140,10 @@ fn set_output_muted(
     name: String,
     muted: bool,
 ) -> Result<(), String> {
-    let mut cfg = state.config.lock();
-    cfg.output_mut(&id, &name).muted = muted;
-    state.save(&cfg)?;
-    state.engine.set_muted(&id, muted);
-    Ok(())
+    state.change(
+        |c| c.output_mut(&id, &name).muted = muted,
+        |_, ()| state.engine.set_muted(&id, muted),
+    )
 }
 
 #[tauri::command]
@@ -236,6 +254,7 @@ pub fn run() {
 
             app.manage(AppState {
                 config: Mutex::new(config),
+                writing: Mutex::new(()),
                 path,
                 engine: Engine::new(),
                 lang,

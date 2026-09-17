@@ -132,6 +132,32 @@ interface Window {
   __AUDIO_MIRROR_LANG__?: string;
   /** Set by `ui/i18n.js`, which loads before the page script. */
   I18n: I18n;
+  /** Set by `ui/view.js`, which loads before the page script. */
+  View: View;
+}
+
+/** A row of the output list: a device that is here, or a turned on one that is not. */
+interface OutputRow extends OutputInfo {
+  absent?: boolean;
+}
+
+/** `ui/view.js`: what the panel shows, worked out without a DOM. */
+interface View {
+  faderToDb(def: number): number;
+  formatDb(db: number): string;
+  peakToDb(peak: number): number;
+  meterTarget(peak: number): number;
+  meterFall(level: number, target: number): number;
+  meterDb(level: number): number;
+  sourceName(source: SourceInfo): string;
+  outputRows(devices: DeviceList, config: AppConfig): OutputRow[];
+  capturedOutput(devices: DeviceList, config: AppConfig): string | null;
+  runState(status: Status | null): { text: string; tone: string };
+  outputState(
+    status: OutputStatus | undefined,
+    row: { enabled: boolean; muted: boolean },
+  ): { label: string; tone: string; detail: string };
+  retrying(message: EngineMessage | null): string;
 }
 
 /** `ui/i18n.js` */
@@ -140,4 +166,5 @@ interface I18n {
   t(key: string, vars?: Record<string, string | number>): string;
   engineMessage(message: EngineMessage | null): string;
   formatNumber(n: number): string;
+  keys(): string[];
 }

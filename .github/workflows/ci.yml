@@ -50,9 +50,11 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Frontend syntax
-        run: for f in ui/*.js; do node --check "$f"; done
+        run: for f in ui/*.js tests/ui/*.js; do node --check "$f"; done
       - name: Frontend types
         run: npm run check:ui
+      - name: Frontend tests
+        run: npm test
 
   test:
     name: Tests (${{ matrix.os }})

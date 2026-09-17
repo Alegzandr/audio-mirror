@@ -233,5 +233,7 @@
     t,
     engineMessage,
     formatNumber: (n) => numbers.format(n),
+    /** The keys this language carries, so a test can compare two languages. */
+    keys: () => Object.keys(strings),
   };
 })();
