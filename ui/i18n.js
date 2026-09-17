@@ -101,73 +101,64 @@
     },
   };
 
-  // Engine messages stay in English in the Rust port (they mirror OBS) and
-  // are translated here. Unknown messages, such as system errors that are
-  // already localized, are shown as they are.
-  /**
-   * @type {Record<string, {
-   *   exact: Record<string, string>,
-   *   contexts: Record<string, string>,
-   *   patterns: [RegExp, string][],
-   *   colon: string,
-   * }>}
-   */
+  // Engine messages carry a stable code (`audio::message` on the Rust side)
+  // and their English wording. The code is the translation key; a message
+  // without a translation falls back to the English the engine sent.
+  /** @type {Record<string, Record<string, string>>} */
   const ENGINE = {
     fr: {
-      exact: {
-        "Device disconnected": "Périphérique déconnecté",
-        "Device unavailable": "Périphérique indisponible",
-        "Output device unavailable": "Périphérique de sortie indisponible",
-        "Waiting for the device": "En attente du périphérique",
-        "Captured by the source": "Capturée par la source",
-        "Screen Recording permission is required for desktop audio":
-          "L’autorisation Enregistrement de l’écran est nécessaire pour capturer le son du bureau",
-        "Screen capture content timed out": "Délai dépassé pour la capture de l’écran",
-        "Main display not found": "Écran principal introuvable",
-        "Failed to start capture": "Impossible de démarrer la capture",
-        "Failed to create resampler": "Impossible de créer le rééchantillonneur",
-        "Failed to create the audio queue": "Impossible de créer la file audio",
-        "Failed to set the queue volume": "Impossible de régler le volume de la file audio",
-        "Failed to allocate audio buffers": "Impossible d’allouer les tampons audio",
-        "Failed to start the audio queue": "Impossible de démarrer la file audio",
-        "PulseAudio is not available": "PulseAudio n’est pas disponible",
-        "Unable to get server info": "Impossible d’obtenir les informations du serveur",
-        "An error occurred while getting the source info":
-          "Une erreur s’est produite en lisant les informations de la source",
-        "Sample spec is not valid": "Format d’échantillonnage non valide",
-        "Unable to create stream": "Impossible de créer le flux",
-        "Unable to connect to stream": "Impossible de se connecter au flux",
-      },
-      // `hr()` in wasapi.rs: "<context>: <HRESULT>".
-      contexts: {
-        "Failed to create enumerator": "Impossible de créer l’énumérateur",
-        "Failed to create IMMDeviceEnumerator": "Impossible de créer l’énumérateur de périphériques",
-        "Failed GetDefaultAudioEndpoint": "Impossible d’obtenir le périphérique par défaut",
-        "Failed to enumerate device": "Impossible d’énumérer le périphérique",
-        "Failed to get device": "Impossible d’obtenir le périphérique",
-        "Failed to activate device": "Impossible d’activer le périphérique",
-        "Failed to activate client context": "Impossible d’activer le client audio",
-        "Failed to get mix format": "Impossible d’obtenir le format de mixage",
-        "Failed to initialize audio client": "Impossible d’initialiser le client audio",
-        "Failed to initialize": "Impossible d’initialiser le périphérique",
-        "Failed to create capture context": "Impossible de créer le contexte de capture",
-        "Failed to set event handle": "Impossible de définir l’événement de capture",
-        "Failed to start capture client": "Impossible de démarrer la capture",
-        "Failed to get buffer size": "Impossible d’obtenir la taille du tampon",
-        "Failed to get render client": "Impossible d’obtenir le client de lecture",
-        "Failed to get IAudioRenderClient": "Impossible d’obtenir le client de lecture",
-        "Failed to get buffer": "Impossible d’obtenir le tampon",
-        "Failed to start audio": "Impossible de démarrer la lecture",
-        "Failed to add video stream output": "Impossible d’ajouter la sortie vidéo du flux",
-        "Failed to add audio stream output": "Impossible d’ajouter la sortie audio du flux",
-      },
-      patterns: [
-        [/^Unknown source (.*)$/s, "Source inconnue {1}"],
-        [/^Stream stopped with error (.*)$/s, "Flux arrêté avec l’erreur {1}"],
-      ],
-      colon: `${NNBSP}: `,
+      "capturedBySource": "Capturée par la source",
+      "deviceDisconnected": "Périphérique déconnecté",
+      "deviceUnavailable": "Périphérique indisponible",
+      "unknownSource": "Source inconnue",
+      "invalidDeviceName": "Nom de périphérique invalide",
+      "resampler": "Impossible de créer le rééchantillonneur",
+      "pulseUnavailable": "PulseAudio n’est pas disponible",
+      "serverInfo": "Impossible d’obtenir les informations du serveur",
+      "sourceInfo": "Une erreur s’est produite en lisant les informations de la source",
+      "sampleSpec": "Format d’échantillonnage non valide",
+      "streamCreate": "Impossible de créer le flux",
+      "streamConnect": "Impossible de se connecter au flux",
+      "screenPermission":
+        "L’autorisation Enregistrement de l’écran est nécessaire pour capturer le son du bureau",
+      "screenTimeout": "Délai dépassé pour la capture de l’écran",
+      "mainDisplay": "Écran principal introuvable",
+      "videoStreamOutput": "Impossible d’ajouter la sortie vidéo du flux",
+      "audioStreamOutput": "Impossible d’ajouter la sortie audio du flux",
+      "captureStart": "Impossible de démarrer la capture",
+      "streamStopped": "Flux arrêté avec l’erreur",
+      "waitingForDevice": "En attente du périphérique",
+      "queueCreate": "Impossible de créer la file audio",
+      "outputUnavailable": "Périphérique de sortie indisponible",
+      "queueVolume": "Impossible de régler le volume de la file audio",
+      "queueBuffers": "Impossible d’allouer les tampons audio",
+      "queueStart": "Impossible de démarrer la file audio",
+      "wasapiEnumerator": "Impossible de créer l’énumérateur",
+      "wasapiDefaultEndpoint": "Impossible d’obtenir le périphérique par défaut",
+      "wasapiEnumerateDevice": "Impossible d’énumérer le périphérique",
+      "wasapiGetDevice": "Impossible d’obtenir le périphérique",
+      "wasapiActivate": "Impossible d’activer le périphérique",
+      "wasapiActivateClient": "Impossible d’activer le client audio",
+      "wasapiMixFormat": "Impossible d’obtenir le format de mixage",
+      "wasapiInitialize": "Impossible d’initialiser le client audio",
+      "wasapiCaptureClient": "Impossible de créer le contexte de capture",
+      "wasapiEventHandle": "Impossible de définir l’événement de capture",
+      "wasapiStartCapture": "Impossible de démarrer la capture",
+      "wasapiBufferSize": "Impossible d’obtenir la taille du tampon",
+      "wasapiRenderClient": "Impossible d’obtenir le client de lecture",
+      "wasapiGetBuffer": "Impossible d’obtenir le tampon",
+      "wasapiStartRender": "Impossible de démarrer la lecture",
+      "wasapiMonitorEnumerator": "Impossible de créer l’énumérateur de périphériques",
+      "wasapiMonitorInitialize": "Impossible d’initialiser le périphérique",
+      "wasapiMonitorRenderClient": "Impossible d’obtenir le client de lecture",
     },
   };
+
+  /**
+   * Separator before the untranslatable detail of a message.
+   * @type {Record<string, string>}
+   */
+  const COLON = { fr: `${NNBSP}: ` };
 
   /** @returns {string} */
   function pick() {
@@ -209,24 +200,15 @@
   }
 
   /**
-   * Translates a status message coming from the audio engine.
-   * @param {string | null} message
+   * Translates a status message coming from the audio engine. An unknown
+   * code keeps the English wording the engine sent with it.
+   * @param {EngineMessage | null} message
    */
   function engineMessage(message) {
-    const table = ENGINE[lang];
     if (!message) return "";
-    if (!table) return message;
-    if (table.exact[message]) return table.exact[message];
-    const sep = message.lastIndexOf(": ");
-    if (sep > 0) {
-      const context = table.contexts[message.slice(0, sep)];
-      if (context) return context + table.colon + message.slice(sep + 2);
-    }
-    for (const [re, template] of table.patterns) {
-      const m = message.match(re);
-      if (m) return fill(template, Object.fromEntries(m.entries()));
-    }
-    return message;
+    const text = (ENGINE[lang] || {})[message.code] || message.text;
+    if (!message.detail) return text;
+    return text ? text + (COLON[lang] || ": ") + message.detail : message.detail;
   }
 
   /**
@@ -251,5 +233,7 @@
     t,
     engineMessage,
     formatNumber: (n) => numbers.format(n),
+    /** The keys this language carries, so a test can compare two languages. */
+    keys: () => Object.keys(strings),
   };
 })();

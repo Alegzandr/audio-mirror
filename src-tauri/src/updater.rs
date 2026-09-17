@@ -127,8 +127,11 @@ async fn watch(app: AppHandle, mut wait: Duration) {
     }
 }
 
+/// A timer, not a parked thread. The wait between checks is six hours, and
+/// `spawn_blocking` would hold a pool thread and its stack for all of it, in
+/// an app whose whole point is to sit in the tray unnoticed.
 async fn sleep(d: Duration) {
-    let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(d)).await;
+    tokio::time::sleep(d).await;
 }
 
 /// Installs a newer release if there is one and returns its version.
@@ -167,8 +170,15 @@ async fn check_and_install(app: &AppHandle, splash: bool) -> Result<Option<Strin
     if splash {
         set_progress(app, Stage::Installing, None);
     }
-    install(&update, &bytes)?;
-    Ok(Some(update.version.clone()))
+    // Writing tens of megabytes and swapping the executable in is disk work,
+    // not async work: left on the runtime's thread it holds up every other
+    // task while it runs, for the same reason the six hour wait between
+    // checks is a timer rather than a parked thread.
+    let version = update.version.clone();
+    tauri::async_runtime::spawn_blocking(move || install(&update, &bytes))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(Some(version))
 }
 
 #[cfg(windows)]

@@ -8,14 +8,16 @@
 //!   drivers such as BlackHole are listed as output captures, like OBS does.
 //! - Monitoring: port of `libobs/audio-monitoring/osx/coreaudio-output.c`:
 //!   an AudioQueue in the OBS format, three 30 ms buffers and a 90 ms
-//!   prefill, paused and prefilled again whenever it runs dry.
+//!   prefill, paused and prefilled again whenever it runs dry. The resampler
+//!   follows the device's clock (`drift.rs`), read from the queue's sample
+//!   time, which OBS does not use.
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -33,11 +35,13 @@ use objc2_screen_capture_kit::{
 };
 use parking_lot::Mutex;
 
+use super::drift::DriftControl;
 use super::format::{
     AudioSpec, ObsAudio, SampleFormat, SourceAudio, Speakers, MAX_AUDIO_CHANNELS, OBS_CHANNELS,
     OBS_SAMPLE_RATE, OBS_SPEAKERS,
 };
 use super::hub::{AudioCallback, SourceHub};
+use super::message::{self as msg, Message};
 use super::swr::Resampler;
 use super::volume::OutputShared;
 use super::{
@@ -47,6 +51,12 @@ use super::{
 
 const OUTPUT_PREFIX: &str = "output:";
 const INPUT_PREFIX: &str = "input:";
+
+/// Largest backlog a monitor keeps, past the three 30 ms queue buffers.
+/// Beyond it the device is not taking what the source produces (two clocks
+/// apart, or a device gone to sleep), and keeping the audio would only
+/// raise the latency for good.
+const MAX_BACKLOG_MS: usize = 400;
 
 // ---------------------------------------------------------------------------
 // C API (CoreFoundation, CoreAudio, AudioToolbox, CoreMedia, CoreGraphics)
@@ -151,8 +161,13 @@ struct AudioBufferList {
 
 #[repr(C)]
 struct AudioTimeStamp {
-    _opaque: [u8; 64],
+    sample_time: f64,
+    _times_and_smpte: [u8; 48],
+    flags: u32,
+    _reserved: u32,
 }
+
+const kAudioTimeStampSampleTimeValid: u32 = 1;
 
 #[repr(C)]
 struct AudioValueTranslation {
@@ -312,6 +327,12 @@ unsafe extern "C" {
     ) -> OSStatus;
     fn AudioQueueStart(aq: AudioQueueRef, start_time: *const c_void) -> OSStatus;
     fn AudioQueuePause(aq: AudioQueueRef) -> OSStatus;
+    fn AudioQueueGetCurrentTime(
+        aq: AudioQueueRef,
+        timeline: *mut c_void,
+        time_stamp: *mut AudioTimeStamp,
+        discontinuity: *mut u8,
+    ) -> OSStatus;
     fn AudioQueueStop(aq: AudioQueueRef, immediate: u8) -> OSStatus;
     fn AudioQueueDispose(aq: AudioQueueRef, immediate: u8) -> OSStatus;
 }
@@ -487,6 +508,29 @@ fn device_id_for_uid(uid: &str) -> Option<AudioObjectID> {
     }
 }
 
+/// `kAudioDevicePropertyDeviceIsAlive`. A device that was unplugged answers
+/// false, or stops answering at all.
+fn device_is_alive(id: AudioObjectID) -> bool {
+    let addr = address(
+        kAudioDevicePropertyDeviceIsAlive,
+        kAudioObjectPropertyScopeGlobal,
+    );
+    let mut alive = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: fixed size output.
+    let stat = unsafe {
+        AudioObjectGetPropertyData(
+            id,
+            &addr,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut alive as *mut _ as *mut c_void,
+        )
+    };
+    stat == noErr && alive != 0
+}
+
 /// `device_is_input` of `audio-device-enum.c`: loopback drivers are shown as
 /// output captures.
 fn device_is_input(name: &str) -> bool {
@@ -507,7 +551,7 @@ fn device_is_input(name: &str) -> bool {
 
 pub fn init_thread() {}
 
-pub fn enumerate() -> Result<DeviceList, String> {
+pub fn enumerate() -> Result<DeviceList, Message> {
     let default_out = default_device(kAudioHardwarePropertyDefaultOutputDevice);
     let default_in = default_device(kAudioHardwarePropertyDefaultInputDevice);
 
@@ -594,40 +638,48 @@ unsafe extern "C" fn devices_changed(
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        let addr = address(
-            kAudioHardwarePropertyDevices,
-            kAudioObjectPropertyScopeGlobal,
-        );
-        // SAFETY: removes the listener added in `watch_system`.
-        unsafe {
-            AudioObjectRemovePropertyListener(
-                kAudioObjectSystemObject,
-                &addr,
-                devices_changed,
-                &*self.callback as *const EventCallback as *mut c_void,
-            )
-        };
+        let data = &*self.callback as *const EventCallback as *mut c_void;
+        for selector in WATCHED {
+            let addr = address(selector, kAudioObjectPropertyScopeGlobal);
+            // SAFETY: removes the listeners added in `watch_system`.
+            unsafe {
+                AudioObjectRemovePropertyListener(
+                    kAudioObjectSystemObject,
+                    &addr,
+                    devices_changed,
+                    data,
+                )
+            };
+        }
     }
 }
+
+/// The default output is watched as a plain device change: unlike
+/// `win-wasapi`, the desktop capture here is ScreenCaptureKit and does not
+/// follow it, so there is nothing to rebuild. Only the list the panel shows
+/// has to catch up.
+const WATCHED: [u32; 2] = [
+    kAudioHardwarePropertyDevices,
+    kAudioHardwarePropertyDefaultOutputDevice,
+];
 
 pub fn watch_system(callback: EventCallback) -> Option<Box<dyn std::any::Any + Send + Sync>> {
     let watcher = Watcher {
         callback: Box::new(callback),
     };
-    let addr = address(
-        kAudioHardwarePropertyDevices,
-        kAudioObjectPropertyScopeGlobal,
-    );
-    // SAFETY: the client data lives as long as the returned watcher.
-    let stat = unsafe {
-        AudioObjectAddPropertyListener(
-            kAudioObjectSystemObject,
-            &addr,
-            devices_changed,
-            &*watcher.callback as *const EventCallback as *mut c_void,
-        )
-    };
-    (stat == noErr).then(|| Box::new(watcher) as Box<dyn std::any::Any + Send + Sync>)
+    let data = &*watcher.callback as *const EventCallback as *mut c_void;
+    let mut added = 0;
+    for selector in WATCHED {
+        let addr = address(selector, kAudioObjectPropertyScopeGlobal);
+        // SAFETY: the client data lives as long as the returned watcher.
+        let stat = unsafe {
+            AudioObjectAddPropertyListener(kAudioObjectSystemObject, &addr, devices_changed, data)
+        };
+        if stat == noErr {
+            added += 1;
+        }
+    }
+    (added > 0).then(|| Box::new(watcher) as Box<dyn std::any::Any + Send + Sync>)
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +720,7 @@ define_class!(
     unsafe impl SCStreamDelegate for ScreenCaptureDelegate {
         #[unsafe(method(stream:didStopWithError:))]
         fn did_stop(&self, _stream: &SCStream, error: &NSError) {
-            let message = format!("Stream stopped with error {}", error.code());
+            let message = msg::STREAM_STOPPED.detail(error.code());
             log::warn!("{message}");
             *self.ivars().shared.state.lock() = CaptureState::Failed(message);
         }
@@ -761,7 +813,7 @@ impl Drop for SckCapture {
 }
 
 /// `init_audio_screen_stream`.
-fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     let (tx, rx) = mpsc::channel();
     let block = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -778,8 +830,8 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&block) };
     let content = rx
         .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "Screen capture content timed out".to_string())?
-        .map_err(|_| "Screen Recording permission is required for desktop audio".to_string())?
+        .map_err(|_| msg::SCREEN_TIMEOUT)?
+        .map_err(|_| msg::SCREEN_PERMISSION)?
         .0;
 
     // SAFETY: ScreenCaptureKit setup mirroring OBS.
@@ -789,7 +841,7 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
         let display = displays
             .iter()
             .find(|d| d.displayID() == main)
-            .ok_or_else(|| "Main display not found".to_string())?;
+            .ok_or(msg::MAIN_DISPLAY)?;
 
         let empty = NSArray::new();
         let filter = SCContentFilter::initWithDisplay_excludingWindows(
@@ -828,14 +880,14 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
                 SCStreamOutputType::Screen,
                 None,
             )
-            .map_err(|e| format!("Failed to add video stream output: {}", e.code()))?;
+            .map_err(|e| msg::VIDEO_STREAM_OUTPUT.detail(e.code()))?;
         stream
             .addStreamOutput_type_sampleHandlerQueue_error(
                 ProtocolObject::from_ref(&*delegate),
                 SCStreamOutputType::Audio,
                 None,
             )
-            .map_err(|e| format!("Failed to add audio stream output: {}", e.code()))?;
+            .map_err(|e| msg::AUDIO_STREAM_OUTPUT.detail(e.code()))?;
 
         let (tx, rx) = mpsc::channel();
         let block = RcBlock::new(move |err: *mut NSError| {
@@ -844,7 +896,7 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
         stream.startCaptureWithCompletionHandler(Some(&block));
         let started = rx.recv_timeout(Duration::from_secs(10)).unwrap_or(false);
         if !started {
-            return Err("Failed to start capture".into());
+            return Err(msg::CAPTURE_START.into());
         }
 
         *shared.state.lock() = CaptureState::Active {
@@ -866,23 +918,64 @@ unsafe impl Send for SendRetained {}
 // Input devices: AUHAL (`mac-audio.c`)
 // ---------------------------------------------------------------------------
 
+/// What the render callback owns while the unit runs.
+///
+/// `coreaudio_init` allocates these buffers and `coreaudio_uninit` frees
+/// them, with `AudioOutputUnitStop` in between, so the callback really is
+/// the only thread that touches them for as long as they exist. `mac-audio.c`
+/// keeps them in the one structure the reconnect thread also mutates and
+/// relies on that ordering alone; holding them apart is the same behaviour
+/// with the exclusive access made real instead of assumed.
+struct RenderState {
+    hub: Arc<SourceHub>,
+    unit: AudioUnit,
+    spec: AudioSpec,
+    buffers: Vec<Vec<u8>>,
+    /// Backing store for an `AudioBufferList`, 8-byte aligned.
+    buf_list: Vec<u64>,
+}
+
+impl RenderState {
+    fn buf_list(&mut self) -> *mut AudioBufferList {
+        self.buf_list.as_mut_ptr() as *mut AudioBufferList
+    }
+}
+
+/// What the device listener reads. Built once and never changed afterwards,
+/// so the listener thread and the reconnect thread only ever share it.
+struct DeviceWatch {
+    uid: String,
+    state: Arc<Mutex<CaptureState>>,
+}
+
 struct CoreAudioData {
     hub: Arc<SourceHub>,
-    uid: String,
+    /// Boxed so its address stays put for as long as the listener is
+    /// registered against it.
+    watch: Box<DeviceWatch>,
     unit: AudioUnit,
     device_id: AudioObjectID,
     au_initialized: bool,
     active: bool,
     spec: AudioSpec,
-    buffers: Vec<Vec<u8>>,
-    /// Backing store for an `AudioBufferList`, 8-byte aligned.
-    buf_list: Vec<u64>,
-    state: Mutex<CaptureState>,
+    /// Handed to the render callback for the lifetime of the unit, and read
+    /// back here only once `AudioOutputUnitStop` has returned.
+    render: *mut RenderState,
 }
 
-// SAFETY: the audio unit is driven from the reconnect thread and read by
-// the render callback, as `mac-audio.c` does.
+// SAFETY: the audio unit and the render state are driven from the reconnect
+// thread, which only touches them while the unit is stopped.
 unsafe impl Send for CoreAudioData {}
+
+impl CoreAudioData {
+    fn uid(&self) -> &str {
+        &self.watch.uid
+    }
+
+    fn set_state(&self, state: CaptureState) {
+        *self.watch.state.lock() = state;
+    }
+}
 
 fn ca_success(stat: OSStatus, what: &str) -> bool {
     if stat != noErr {
@@ -929,10 +1022,6 @@ fn convert_ca_format(flags: u32, bits: u32) -> Option<SampleFormat> {
 }
 
 impl CoreAudioData {
-    fn buf_list(&mut self) -> *mut AudioBufferList {
-        self.buf_list.as_mut_ptr() as *mut AudioBufferList
-    }
-
     /// `coreaudio_init_format` with downmix enabled.
     unsafe fn init_format(&mut self) -> bool {
         let mut input: AudioStreamBasicDescription = Default::default();
@@ -1056,15 +1145,21 @@ impl CoreAudioData {
 
         let bytes = frames as usize * std::mem::size_of::<f32>();
         let count = desc.channels_per_frame as usize;
-        self.buffers = (0..count).map(|_| vec![0u8; bytes]).collect();
         let bytes_needed = BUFFER_LIST_HEADER + std::mem::size_of::<AudioBuffer>() * count.max(1);
-        self.buf_list = vec![0u64; bytes_needed.div_ceil(8)];
-        let list = self.buf_list();
+        let mut render = Box::new(RenderState {
+            hub: self.hub.clone(),
+            unit: self.unit,
+            spec: self.spec,
+            buffers: (0..count).map(|_| vec![0u8; bytes]).collect(),
+            buf_list: vec![0u64; bytes_needed.div_ceil(8)],
+        });
+
+        let list = render.buf_list();
         // SAFETY: the byte buffer is sized for `count` AudioBuffer entries.
         unsafe {
             (*list).number_buffers = count as u32;
             let entries = (list as *mut u8).add(BUFFER_LIST_HEADER) as *mut AudioBuffer;
-            for (i, buf) in self.buffers.iter_mut().enumerate() {
+            for (i, buf) in render.buffers.iter_mut().enumerate() {
                 entries.add(i).write(AudioBuffer {
                     number_channels: 1,
                     data_byte_size: bytes as u32,
@@ -1072,6 +1167,8 @@ impl CoreAudioData {
                 });
             }
         }
+        // From here the callback owns it, until `uninit` takes it back.
+        self.render = Box::into_raw(render);
         true
     }
 }
@@ -1084,31 +1181,42 @@ unsafe extern "C" fn input_callback(
     frames: u32,
     _ignored: *mut AudioBufferList,
 ) -> OSStatus {
-    // SAFETY: ref_con is the capture's `CoreAudioData`.
+    // SAFETY: `ref_con` is the `RenderState` built for this unit. It exists
+    // from before `AudioOutputUnitStart` until after `AudioOutputUnitStop`
+    // has returned, and nothing else reads it in between, so this reference
+    // is the only one alive for the length of the call.
+    let render = unsafe { &mut *(ref_con as *mut RenderState) };
+    // SAFETY: the list is sized for the buffers, which outlive the render.
     unsafe {
-        let ca = &mut *(ref_con as *mut CoreAudioData);
-        let list = ca.buf_list();
-        for (i, buf) in ca.buffers.iter().enumerate() {
-            let entry = (list as *mut u8).add(BUFFER_LIST_HEADER) as *mut AudioBuffer;
-            (*entry.add(i)).data_byte_size = buf.len() as u32;
+        let list = render.buf_list();
+        let entries = (list as *mut u8).add(BUFFER_LIST_HEADER) as *mut AudioBuffer;
+        for (i, buf) in render.buffers.iter().enumerate() {
+            (*entries.add(i)).data_byte_size = buf.len() as u32;
         }
-        let stat = AudioUnitRender(ca.unit, action_flags, time_stamp, bus_number, frames, list);
+        let stat = AudioUnitRender(
+            render.unit,
+            action_flags,
+            time_stamp,
+            bus_number,
+            frames,
+            list,
+        );
         if !ca_success(stat, "audio retrieval") {
             return noErr;
         }
-
-        let bytes = frames as usize * ca.spec.format.bytes_per_sample();
-        let mut planes: [&[u8]; MAX_AUDIO_CHANNELS] = [&[]; MAX_AUDIO_CHANNELS];
-        let count = ca.buffers.len().min(MAX_AUDIO_CHANNELS);
-        for (plane, buf) in planes.iter_mut().zip(&ca.buffers).take(count) {
-            *plane = &buf[..bytes.min(buf.len())];
-        }
-        ca.hub.output_audio(&SourceAudio {
-            planes: &planes[..count],
-            frames,
-            spec: ca.spec,
-        });
     }
+
+    let bytes = frames as usize * render.spec.format.bytes_per_sample();
+    let mut planes: [&[u8]; MAX_AUDIO_CHANNELS] = [&[]; MAX_AUDIO_CHANNELS];
+    let count = render.buffers.len().min(MAX_AUDIO_CHANNELS);
+    for (plane, buf) in planes.iter_mut().zip(&render.buffers).take(count) {
+        *plane = &buf[..bytes.min(buf.len())];
+    }
+    render.hub.output_audio(&SourceAudio {
+        planes: &planes[..count],
+        frames,
+        spec: render.spec,
+    });
     noErr
 }
 
@@ -1118,10 +1226,11 @@ unsafe extern "C" fn device_notification(
     _addresses: *const AudioObjectPropertyAddress,
     client_data: *mut c_void,
 ) -> OSStatus {
-    // SAFETY: client_data is the capture's `CoreAudioData`.
-    let ca = unsafe { &*(client_data as *const CoreAudioData) };
-    log::info!("coreaudio: device '{}' disconnected or changed", ca.uid);
-    *ca.state.lock() = CaptureState::Retrying("Device disconnected".into());
+    // SAFETY: `client_data` is the capture's `DeviceWatch`, which is built
+    // once and never changed, so every holder only ever shares it.
+    let watch = unsafe { &*(client_data as *const DeviceWatch) };
+    log::info!("coreaudio: device '{}' disconnected or changed", watch.uid);
+    *watch.state.lock() = CaptureState::Retrying(msg::DEVICE_DISCONNECTED.into());
     noErr
 }
 
@@ -1131,7 +1240,7 @@ impl CoreAudioData {
         if self.au_initialized {
             return true;
         }
-        let Some(id) = device_id_for_uid(&self.uid) else {
+        let Some(id) = device_id_for_uid(self.uid()) else {
             return false;
         };
         self.device_id = id;
@@ -1201,19 +1310,19 @@ impl CoreAudioData {
             }
         }
         self.active = true;
-        *self.state.lock() = CaptureState::Active {
+        self.set_state(CaptureState::Active {
             format: describe(self.spec.rate, self.spec.speakers.channels()),
-        };
+        });
         log::info!(
             "coreaudio: Device '{}' [{} Hz] initialized",
-            self.uid,
+            self.uid(),
             self.spec.rate
         );
         true
     }
 
     unsafe fn init_hooks(&mut self) -> bool {
-        let me = self as *mut CoreAudioData as *mut c_void;
+        let watch = &*self.watch as *const DeviceWatch as *mut c_void;
         unsafe {
             for selector in [
                 kAudioDevicePropertyDeviceIsAlive,
@@ -1221,7 +1330,12 @@ impl CoreAudioData {
             ] {
                 let addr = address(selector, kAudioObjectPropertyScopeGlobal);
                 if !ca_success(
-                    AudioObjectAddPropertyListener(self.device_id, &addr, device_notification, me),
+                    AudioObjectAddPropertyListener(
+                        self.device_id,
+                        &addr,
+                        device_notification,
+                        watch,
+                    ),
                     "set device callback",
                 ) {
                     return false;
@@ -1229,7 +1343,7 @@ impl CoreAudioData {
             }
             let callback = AURenderCallbackStruct {
                 input_proc: input_callback,
-                input_proc_ref_con: me,
+                input_proc_ref_con: self.render as *mut c_void,
             };
             ca_success(
                 AudioUnitSetProperty(
@@ -1246,14 +1360,19 @@ impl CoreAudioData {
     }
 
     unsafe fn remove_hooks(&mut self) {
-        let me = self as *mut CoreAudioData as *mut c_void;
+        let watch = &*self.watch as *const DeviceWatch as *mut c_void;
         unsafe {
             for selector in [
                 kAudioDevicePropertyDeviceIsAlive,
                 kAudioStreamPropertyAvailablePhysicalFormats,
             ] {
                 let addr = address(selector, kAudioObjectPropertyScopeGlobal);
-                AudioObjectRemovePropertyListener(self.device_id, &addr, device_notification, me);
+                AudioObjectRemovePropertyListener(
+                    self.device_id,
+                    &addr,
+                    device_notification,
+                    watch,
+                );
             }
         }
     }
@@ -1276,22 +1395,35 @@ impl CoreAudioData {
             }
         }
         self.au_initialized = false;
-        self.buffers.clear();
-        self.buf_list.clear();
+        // The unit is stopped and disposed, so the callback can no longer
+        // run: the buffers it owned are ours to free.
+        if !self.render.is_null() {
+            // SAFETY: the pointer came from `Box::into_raw` in `init_buffer`
+            // and is taken back exactly once.
+            drop(unsafe { Box::from_raw(self.render) });
+            self.render = ptr::null_mut();
+        }
     }
 }
 
 struct InputCapture {
+    /// Read straight through, so asking what the capture is doing never
+    /// waits for the reconnect thread to finish opening a device.
+    state: Arc<Mutex<CaptureState>>,
     data: Arc<Mutex<Box<CoreAudioData>>>,
     exit: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 /// Initial try, then the reconnect thread of `mac-audio.c` (2 s retries).
-fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
+    let state = Arc::new(Mutex::new(CaptureState::Starting));
     let data = Arc::new(Mutex::new(Box::new(CoreAudioData {
         hub,
-        uid: uid.to_string(),
+        watch: Box::new(DeviceWatch {
+            uid: uid.to_string(),
+            state: state.clone(),
+        }),
         unit: ptr::null_mut(),
         device_id: 0,
         au_initialized: false,
@@ -1301,29 +1433,27 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Strin
             speakers: OBS_SPEAKERS,
             format: SampleFormat::FloatPlanar,
         },
-        buffers: Vec::new(),
-        buf_list: Vec::new(),
-        state: Mutex::new(CaptureState::Starting),
+        render: ptr::null_mut(),
     })));
     let exit = Arc::new(AtomicBool::new(false));
 
     let thread = {
         let shared = data.clone();
         let exit = exit.clone();
+        let state = state.clone();
         std::thread::Builder::new()
             .name("coreaudio: reconnect".into())
             .spawn(move || loop {
                 {
                     let mut ca = shared.lock();
-                    let lost = matches!(*ca.state.lock(), CaptureState::Retrying(_));
+                    let lost = matches!(*state.lock(), CaptureState::Retrying(_));
                     // SAFETY: the unit is driven from this thread only.
                     unsafe {
                         if lost {
                             ca.uninit();
                         }
                         if !ca.au_initialized && !ca.init() {
-                            *ca.state.lock() =
-                                CaptureState::Retrying("Waiting for the device".into());
+                            ca.set_state(CaptureState::Retrying(msg::WAITING_FOR_DEVICE.into()));
                         }
                     }
                 }
@@ -1334,10 +1464,11 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Strin
                     std::thread::sleep(Duration::from_millis(100));
                 }
             })
-            .map_err(|e| e.to_string())?
+            .map_err(|e| msg::SYSTEM.detail(e))?
     };
 
     Ok(Box::new(InputCapture {
+        state,
         data,
         exit,
         thread: Some(thread),
@@ -1346,7 +1477,7 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Strin
 
 impl Capture for InputCapture {
     fn state(&self) -> CaptureState {
-        self.data.lock().state.lock().clone()
+        self.state.lock().clone()
     }
 }
 
@@ -1361,7 +1492,7 @@ impl Drop for InputCapture {
     }
 }
 
-pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     if source == DESKTOP {
         start_desktop(hub)
     } else if let Some(uid) = source
@@ -1370,7 +1501,7 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
     {
         start_input(uid, hub)
     } else {
-        Err(format!("Unknown source {source}"))
+        Err(msg::UNKNOWN_SOURCE.detail(source))
     }
 }
 
@@ -1382,11 +1513,19 @@ struct QueueState {
     empty_buffers: VecDeque<AudioQueueBufferRef>,
     new_data: VecDeque<u8>,
     buffer_size: usize,
+    /// Cap on `new_data`, from [`MAX_BACKLOG_MS`].
+    max_backlog: usize,
     wait_size: usize,
     paused: bool,
+    /// Frames handed to the queue since it started.
+    enqueued: u64,
+    drift: DriftControl,
 }
 
 struct QueueMonitor {
+    /// UID of the output device, resolved again on every status read so an
+    /// unplugged device is noticed.
+    device: String,
     queue: AudioQueueRef,
     buffers: [AudioQueueBufferRef; 3],
     /// `monitor->mutex`.
@@ -1396,6 +1535,9 @@ struct QueueMonitor {
     active: AtomicBool,
     channels: usize,
     format: String,
+    /// Frames dropped because the backlog was cut back. Logged on powers of
+    /// two, like the skipped packets of `wasapi.rs`.
+    dropped: AtomicU64,
 }
 
 // SAFETY: the queue is thread safe; buffers are guarded by `state`.
@@ -1413,10 +1555,15 @@ impl QueueMonitor {
         };
         unsafe {
             let dst = std::slice::from_raw_parts_mut((*buf).audio_data as *mut u8, st.buffer_size);
-            for (d, s) in dst.iter_mut().zip(st.new_data.drain(..st.buffer_size)) {
-                *d = s;
-            }
+            // A ring buffer is at most two runs, so this is two memcpy
+            // rather than a branch per byte, inside the queue callback.
+            let (front, back) = st.new_data.as_slices();
+            let head = front.len().min(st.buffer_size);
+            dst[..head].copy_from_slice(&front[..head]);
+            dst[head..].copy_from_slice(&back[..st.buffer_size - head]);
+            st.new_data.drain(..st.buffer_size);
             (*buf).audio_data_byte_size = st.buffer_size as u32;
+            st.enqueued += (st.buffer_size / (size_of::<f32>() * self.channels)) as u64;
             let stat = AudioQueueEnqueueBuffer(self.queue, buf, 0, ptr::null());
             if !ca_success(stat, "AudioQueueEnqueueBuffer") {
                 AudioQueueStop(self.queue, 0);
@@ -1450,6 +1597,36 @@ unsafe extern "C" fn buffer_audio(
     }
 }
 
+impl QueueMonitor {
+    /// Frames queued ahead of the device: the backlog here plus what the
+    /// queue holds, from its own sample time, which runs on the device's
+    /// clock. Counting the buffers instead would move in 30 ms steps.
+    /// `None` while the queue waits for audio.
+    ///
+    /// # Safety
+    /// Called under the monitor mutex.
+    unsafe fn queued(&self, st: &QueueState) -> Option<f64> {
+        if st.paused || st.wait_size != 0 {
+            return None;
+        }
+        let mut time = AudioTimeStamp {
+            sample_time: 0.0,
+            _times_and_smpte: [0; 48],
+            flags: 0,
+            _reserved: 0,
+        };
+        // SAFETY: the queue lives as long as the monitor.
+        let stat = unsafe {
+            AudioQueueGetCurrentTime(self.queue, ptr::null_mut(), &mut time, ptr::null_mut())
+        };
+        if stat != noErr || time.flags & kAudioTimeStampSampleTimeValid == 0 {
+            return None;
+        }
+        let backlog = (st.new_data.len() / (size_of::<f32>() * self.channels)) as f64;
+        Some(backlog + st.enqueued as f64 - time.sample_time)
+    }
+}
+
 impl AudioCallback for QueueMonitor {
     /// `on_audio_playback`.
     fn on_audio(&self, audio: &ObsAudio) {
@@ -1473,7 +1650,32 @@ impl AudioCallback for QueueMonitor {
         self.shared.apply_f32(floats, vol);
 
         let mut st = self.state.lock();
-        st.new_data.extend(data.iter().copied());
+        // Applied from the next packet on; see `drift.rs`.
+        // SAFETY: queue call under the monitor mutex.
+        if let Some(queued) = unsafe { self.queued(&st) } {
+            let ppm = st.drift.update(queued, frames);
+            if let Some((ppm, off)) = st.drift.report() {
+                log::info!(
+                    "'{}': clock {ppm:+.1} ppm, level {off:+.1} ms from its mark",
+                    self.device
+                );
+            }
+            st.new_data.extend(data.iter().copied());
+            rs.set_drift(ppm);
+        } else {
+            st.new_data.extend(data.iter().copied());
+        }
+        // The queue is not draining what the source produces: drop the
+        // oldest audio rather than play further and further behind it.
+        if st.new_data.len() > st.max_backlog {
+            let excess = st.new_data.len() - st.max_backlog;
+            st.new_data.drain(..excess);
+            let frames = excess / (size_of::<f32>() * self.channels);
+            let total = self.dropped.fetch_add(frames as u64, Ordering::Relaxed) + frames as u64;
+            if total.is_power_of_two() {
+                log::warn!("'{}': {total} frames dropped so far", self.device);
+            }
+        }
         if st.new_data.len() >= st.wait_size {
             st.wait_size = 0;
             // SAFETY: queue calls under the monitor mutex, as in OBS.
@@ -1493,9 +1695,19 @@ impl AudioCallback for QueueMonitor {
 }
 
 impl Monitor for QueueMonitor {
+    /// An AudioQueue whose device went away keeps taking buffers and plays
+    /// none of them, so the device is what has to be looked at.
+    /// `coreaudio-output.c` never does, because OBS rebuilds a monitor only
+    /// from `obs_reset_audio_monitoring`; without this the output would stay
+    /// silent while the panel reported it as playing. The property is the
+    /// one `coreaudio_init_hooks` already watches for an input capture. See
+    /// the retry deviation on `MONITOR_RETRY`.
     fn state(&self) -> MonitorState {
-        MonitorState::Playing {
-            format: self.format.clone(),
+        match device_id_for_uid(&self.device) {
+            Some(id) if device_is_alive(id) => MonitorState::Playing {
+                format: self.format.clone(),
+            },
+            _ => MonitorState::Reconnecting(msg::DEVICE_DISCONNECTED.into()),
         }
     }
 }
@@ -1526,7 +1738,7 @@ pub fn create_monitor(
     source: &str,
     device: &str,
     shared: Arc<OutputShared>,
-) -> Result<MonitorInit, String> {
+) -> Result<MonitorInit, Message> {
     if source.strip_prefix(OUTPUT_PREFIX) == Some(device) {
         return Ok(MonitorInit::Ignored);
     }
@@ -1554,24 +1766,29 @@ pub fn create_monitor(
         format: SampleFormat::Float,
         ..from
     };
-    let resampler =
-        Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
+    let resampler = Resampler::adjustable(to, from).ok_or(msg::RESAMPLER)?;
 
     let mut monitor = Arc::new(QueueMonitor {
+        device: device.to_string(),
         queue: ptr::null_mut(),
         buffers: [ptr::null_mut(); 3],
         state: Mutex::new(QueueState {
             empty_buffers: VecDeque::new(),
             new_data: VecDeque::new(),
             buffer_size,
+            max_backlog: size_of::<f32>() * channels * OBS_SAMPLE_RATE as usize / 1000
+                * MAX_BACKLOG_MS,
             wait_size: buffer_size * 3,
             paused: false,
+            enqueued: 0,
+            drift: DriftControl::new(OBS_SAMPLE_RATE),
         }),
         resampler: Mutex::new(resampler),
         shared,
         active: AtomicBool::new(false),
         channels,
         format: describe(OBS_SAMPLE_RATE, channels),
+        dropped: AtomicU64::new(0),
     });
 
     let user_data = Arc::as_ptr(&monitor) as *mut c_void;
@@ -1589,10 +1806,10 @@ pub fn create_monitor(
             &mut m.queue,
         );
         if !ca_success(stat, "AudioQueueNewOutput") {
-            return Err("Failed to create the audio queue".into());
+            return Err(msg::QUEUE_CREATE.into());
         }
 
-        let uid = std::ffi::CString::new(device).map_err(|e| e.to_string())?;
+        let uid = std::ffi::CString::new(device).map_err(|e| msg::SYSTEM.detail(e))?;
         let cf_uid = CFStringCreateWithCString(ptr::null(), uid.as_ptr(), kCFStringEncodingUTF8);
         let stat = AudioQueueSetProperty(
             m.queue,
@@ -1602,26 +1819,26 @@ pub fn create_monitor(
         );
         CFRelease(cf_uid);
         if !ca_success(stat, "set current device") {
-            return Err("Output device unavailable".into());
+            return Err(msg::OUTPUT_UNAVAILABLE.into());
         }
 
         if !ca_success(
             AudioQueueSetParameter(m.queue, kAudioQueueParam_Volume, 1.0),
             "set volume",
         ) {
-            return Err("Failed to set the queue volume".into());
+            return Err(msg::QUEUE_VOLUME.into());
         }
 
         for i in 0..3 {
             let stat = AudioQueueAllocateBuffer(m.queue, buffer_size as u32, &mut m.buffers[i]);
             if !ca_success(stat, "allocation of buffer") {
-                return Err("Failed to allocate audio buffers".into());
+                return Err(msg::QUEUE_BUFFERS.into());
             }
             m.state.get_mut().empty_buffers.push_back(m.buffers[i]);
         }
 
         if !ca_success(AudioQueueStart(m.queue, ptr::null()), "start") {
-            return Err("Failed to start the audio queue".into());
+            return Err(msg::QUEUE_START.into());
         }
     }
     m.active.store(true, Ordering::Relaxed);

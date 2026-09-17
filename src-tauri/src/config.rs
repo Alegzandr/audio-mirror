@@ -104,10 +104,6 @@ impl AppConfig {
         o
     }
 
-    pub fn enabled_count(&self) -> usize {
-        self.outputs.iter().filter(|o| o.enabled).count()
-    }
-
     pub fn engine_config(&self) -> EngineConfig {
         EngineConfig {
             source: self.source.clone(),
@@ -147,7 +143,6 @@ mod tests {
         let loaded = AppConfig::load(&path);
         assert_eq!(loaded, cfg);
         assert_eq!(loaded.outputs[0].name, "Headphones");
-        assert_eq!(loaded.enabled_count(), 1);
 
         let ec = loaded.engine_config();
         assert_eq!(ec.outputs.len(), 1);

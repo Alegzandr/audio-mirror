@@ -4,7 +4,6 @@
 //! registered capture callback on the capture thread
 //! (`source_signal_audio_data`). Monitors are those callbacks.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -14,6 +13,7 @@ use super::format::{
     OBS_SAMPLE_RATE, OBS_SPEAKERS,
 };
 use super::swr::Resampler;
+use super::volume::AtomicF32;
 
 /// `obs_source_audio_capture_t`.
 pub trait AudioCallback: Send + Sync {
@@ -30,23 +30,25 @@ struct ProcessState {
     storage: [Vec<f32>; OBS_CHANNELS],
 }
 
+/// `audio_cb_list`. Behind an `Arc` so the capture thread can take the list
+/// and call the monitors without holding the lock: one device blocking in
+/// `on_audio` then holds up neither the other outputs nor a monitor being
+/// added or removed.
+type Callbacks = Arc<Vec<(CallbackId, Arc<dyn AudioCallback>)>>;
+
 pub struct SourceHub {
     process: Mutex<ProcessState>,
-    /// `audio_cb_list`, guarded like `audio_cb_mutex`.
-    callbacks: Mutex<Vec<(CallbackId, Arc<dyn AudioCallback>)>>,
+    /// Guarded like `audio_cb_mutex`.
+    callbacks: Mutex<Callbacks>,
     next_id: Mutex<CallbackId>,
-    /// Peak of the converted audio since the last read, for the UI.
-    peak: AtomicU32,
-}
-
-impl Default for SourceHub {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Peak of the converted audio since the last read. Owned by the engine
+    /// and read in `Engine::status` like each output's, so every meter
+    /// covers the same window: the time since the panel last asked.
+    peak: Arc<AtomicF32>,
 }
 
 impl SourceHub {
-    pub fn new() -> Self {
+    pub fn new(peak: Arc<AtomicF32>) -> Self {
         Self {
             process: Mutex::new(ProcessState {
                 sample_info: None,
@@ -54,9 +56,9 @@ impl SourceHub {
                 audio_failed: false,
                 storage: [Vec::new(), Vec::new()],
             }),
-            callbacks: Mutex::new(Vec::new()),
+            callbacks: Mutex::new(Callbacks::default()),
             next_id: Mutex::new(1),
-            peak: AtomicU32::new(0f32.to_bits()),
+            peak,
         }
     }
 
@@ -68,17 +70,13 @@ impl SourceHub {
             *next += 1;
             id
         };
-        self.callbacks.lock().push((id, cb));
+        Arc::make_mut(&mut self.callbacks.lock()).push((id, cb));
         id
     }
 
     /// `obs_source_remove_audio_capture_callback`.
     pub fn remove_callback(&self, id: CallbackId) {
-        self.callbacks.lock().retain(|(i, _)| *i != id);
-    }
-
-    pub fn take_peak(&self) -> f32 {
-        f32::from_bits(self.peak.swap(0f32.to_bits(), Ordering::Relaxed))
+        Arc::make_mut(&mut self.callbacks.lock()).retain(|(i, _)| *i != id);
     }
 
     /// `obs_source_output_audio`. Called on the capture thread.
@@ -93,18 +91,16 @@ impl SourceHub {
             .iter()
             .flat_map(|p| p.iter())
             .fold(0f32, |m, s| m.max(s.abs()));
-        let _ = self
-            .peak
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                (peak > f32::from_bits(cur)).then_some(peak.to_bits())
-            });
+        self.peak.raise(peak);
 
         let data = ObsAudio {
             planes,
             frames: frames as u32,
         };
-        // `source_signal_audio_data`: newest callback first, under the lock.
-        let callbacks = self.callbacks.lock();
+        // `source_signal_audio_data`: newest callback first. A monitor
+        // removed while a packet is on its way still receives it, and its
+        // last `Arc` is released here rather than in the supervisor.
+        let callbacks = self.callbacks.lock().clone();
         for (_, cb) in callbacks.iter().rev() {
             cb.on_audio(&data);
         }
@@ -158,8 +154,17 @@ fn process_audio(st: &mut ProcessState, audio: &SourceAudio) -> Option<usize> {
         }
         None => {
             let n = audio.frames as usize;
+            // Already in the OBS format, so the backend owes us one plane per
+            // channel holding `frames` samples. Dropping a packet that does
+            // not is better than taking the capture thread down with it.
+            if audio.planes.len() < OBS_CHANNELS {
+                return None;
+            }
             for ch in 0..OBS_CHANNELS {
                 let samples = as_f32(audio.planes[ch]);
+                if samples.len() < n {
+                    return None;
+                }
                 copy_plane(&mut st.storage[ch], &samples[..n]);
             }
             n
@@ -198,7 +203,8 @@ mod tests {
 
     #[test]
     fn converts_then_signals_callbacks() {
-        let hub = SourceHub::new();
+        let peak = Arc::new(AtomicF32::new(0.0));
+        let hub = SourceHub::new(peak.clone());
         let probe = Arc::new(Probe(Mutex::new(Vec::new())));
         let id = hub.add_callback(probe.clone());
 
@@ -220,7 +226,7 @@ mod tests {
             (calls[0].1 - 0.5).abs() < 1e-3,
             "mono reaches the right channel"
         );
-        assert!(hub.take_peak() > 0.49);
+        assert!(peak.take() > 0.49);
 
         hub.remove_callback(id);
         hub.output_audio(&SourceAudio {
@@ -233,7 +239,7 @@ mod tests {
 
     #[test]
     fn obs_format_passes_through() {
-        let hub = SourceHub::new();
+        let hub = SourceHub::new(Arc::default());
         let probe = Arc::new(Probe(Mutex::new(Vec::new())));
         hub.add_callback(probe.clone());
         let l = interleaved(100, 1, 0.1);

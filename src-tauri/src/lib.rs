@@ -22,6 +22,8 @@ const AUTOSTART_ARG: &str = "--autostart";
 
 pub(crate) struct AppState {
     config: Mutex<AppConfig>,
+    /// Held while the settings are written, see [`AppState::change`].
+    writing: Mutex<()>,
     path: PathBuf,
     engine: Engine,
     pub(crate) lang: Lang,
@@ -30,17 +32,33 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    fn save(&self, cfg: &AppConfig) -> Result<(), String> {
-        cfg.save(&self.path).map_err(|e| e.to_string())
+    /// Changes the settings, writes them, and hands `apply` the result.
+    ///
+    /// The file is written with the settings unlocked, so the panel reading
+    /// them, a volume going to the audio thread, and the next command do not
+    /// queue behind a disk that answers slowly, which a roaming or networked
+    /// profile directory does. `writing` takes the place of that lock for
+    /// the writers alone: it is taken first and held across the write, so
+    /// two changes reach the file in the order they were made.
+    fn change<T>(
+        &self,
+        f: impl FnOnce(&mut AppConfig) -> T,
+        apply: impl FnOnce(&AppConfig, T),
+    ) -> Result<(), String> {
+        let _writing = self.writing.lock();
+        let (cfg, value) = {
+            let mut cfg = self.config.lock();
+            let value = f(&mut cfg);
+            (cfg.clone(), value)
+        };
+        cfg.save(&self.path).map_err(|e| e.to_string())?;
+        apply(&cfg, value);
+        Ok(())
     }
 
     /// Applies a change, saves it and pushes it to the engine.
     fn update(&self, f: impl FnOnce(&mut AppConfig)) -> Result<(), String> {
-        let mut cfg = self.config.lock();
-        f(&mut cfg);
-        self.save(&cfg)?;
-        self.engine.apply(cfg.engine_config());
-        Ok(())
+        self.change(f, |cfg, ()| self.engine.apply(cfg.engine_config()))
     }
 }
 
@@ -57,7 +75,8 @@ struct Snapshot {
 async fn snapshot(app: AppHandle, state: State<'_, AppState>) -> Result<Snapshot, String> {
     let devices = tauri::async_runtime::spawn_blocking(audio::enumerate)
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     Ok(Snapshot {
         version: app.package_info().version.to_string(),
         config: state.config.lock().clone(),
@@ -102,15 +121,16 @@ fn set_output_volume(
     };
     // Volume goes straight to the audio thread, the stream is not rebuilt.
     // While the slider moves, only the final position is written to disk.
-    let mut cfg = state.config.lock();
-    cfg.output_mut(&id, &name).fader = fader;
-    if persist {
-        state.save(&cfg)?;
+    let gain = audio::volume::fader_to_gain(fader);
+    if !persist {
+        state.config.lock().output_mut(&id, &name).fader = fader;
+        state.engine.set_gain(&id, gain);
+        return Ok(());
     }
-    state
-        .engine
-        .set_gain(&id, audio::volume::fader_to_gain(fader));
-    Ok(())
+    state.change(
+        |c| c.output_mut(&id, &name).fader = fader,
+        |_, ()| state.engine.set_gain(&id, gain),
+    )
 }
 
 #[tauri::command]
@@ -120,11 +140,10 @@ fn set_output_muted(
     name: String,
     muted: bool,
 ) -> Result<(), String> {
-    let mut cfg = state.config.lock();
-    cfg.output_mut(&id, &name).muted = muted;
-    state.save(&cfg)?;
-    state.engine.set_muted(&id, muted);
-    Ok(())
+    state.change(
+        |c| c.output_mut(&id, &name).muted = muted,
+        |_, ()| state.engine.set_muted(&id, muted),
+    )
 }
 
 #[tauri::command]
@@ -181,6 +200,27 @@ pub(crate) fn start(app: &AppHandle) {
     }
 }
 
+/// Writes the engine's messages to a rotating file in the app log folder, so
+/// a device that refuses to open leaves a trace to report. Without this the
+/// `log` calls spread over the audio backends go nowhere.
+fn logging<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    let mut builder = tauri_plugin_log::Builder::new()
+        .level(log::LevelFilter::Info)
+        .max_file_size(512 * 1024)
+        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+        .target(tauri_plugin_log::Target::new(
+            tauri_plugin_log::TargetKind::LogDir {
+                file_name: Some("audio-mirror".into()),
+            },
+        ));
+    if cfg!(debug_assertions) {
+        builder = builder.target(tauri_plugin_log::Target::new(
+            tauri_plugin_log::TargetKind::Stdout,
+        ));
+    }
+    builder.build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
@@ -191,6 +231,7 @@ pub fn run() {
     let lang = Lang::detect();
 
     tauri::Builder::default()
+        .plugin(logging())
         .plugin(i18n::plugin(lang))
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             // During the startup update check, the splash is already showing.
@@ -213,6 +254,7 @@ pub fn run() {
 
             app.manage(AppState {
                 config: Mutex::new(config),
+                writing: Mutex::new(()),
                 path,
                 engine: Engine::new(),
                 lang,

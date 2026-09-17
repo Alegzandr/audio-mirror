@@ -8,7 +8,8 @@
 //! - Monitoring: port of `libobs/audio-monitoring/win32/wasapi-output.c`:
 //!   each packet is resampled and written straight away from the capture
 //!   thread; any failure drops the client, which is reopened on the next
-//!   packet.
+//!   packet. The resampler follows the device's clock (`drift.rs`), read
+//!   from `IAudioClock`, which OBS does not use.
 
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use windows::core::{implement, Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, EDataFlow, ERole, IAudioCaptureClient, IAudioClient,
+    eCapture, eConsole, eRender, EDataFlow, ERole, IAudioCaptureClient, IAudioClient, IAudioClock,
     IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
     IMMNotificationClient_Impl, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -33,10 +34,12 @@ use windows::Win32::System::Threading::{
     SetEvent, WaitForMultipleObjects, INFINITE,
 };
 
+use super::drift::DriftControl;
 use super::format::{
     AudioSpec, ObsAudio, SampleFormat, SourceAudio, Speakers, OBS_SAMPLE_RATE, OBS_SPEAKERS,
 };
 use super::hub::{AudioCallback, SourceHub};
+use super::message::{self as msg, Kind, Message};
 use super::swr::Resampler;
 use super::volume::OutputShared;
 use super::{
@@ -190,8 +193,8 @@ fn list_devices(en: &IMMDeviceEnumerator, flow: EDataFlow) -> Vec<(String, Strin
     out
 }
 
-pub fn enumerate() -> Result<DeviceList, String> {
-    let en = enumerator().map_err(|e| e.message())?;
+pub fn enumerate() -> Result<DeviceList, Message> {
+    let en = enumerator().map_err(|e| msg::SYSTEM.detail(e.message()))?;
     let default_out = default_output_id();
     // SAFETY: COM call.
     let default_in = unsafe { en.GetDefaultAudioEndpoint(eCapture, eConsole) }
@@ -243,7 +246,7 @@ enum SourceType {
 }
 
 impl SourceType {
-    fn parse(source: &str) -> Result<SourceType, String> {
+    fn parse(source: &str) -> Result<SourceType, Message> {
         if source == DESKTOP {
             Ok(SourceType::DefaultOutput)
         } else if let Some(id) = source.strip_prefix(OUTPUT_PREFIX) {
@@ -251,7 +254,7 @@ impl SourceType {
         } else if let Some(id) = source.strip_prefix(INPUT_PREFIX) {
             Ok(SourceType::Input(id.to_string()))
         } else {
-            Err(format!("Unknown source {source}"))
+            Err(msg::UNKNOWN_SOURCE.detail(source))
         }
     }
 
@@ -323,8 +326,8 @@ impl Drop for MixFormat {
     }
 }
 
-fn hr(context: &str, e: windows::core::Error) -> String {
-    format!("{context}: {:08X}", e.code().0)
+fn hr(context: Kind, e: windows::core::Error) -> Message {
+    context.detail(format!("{:08X}", e.code().0))
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +356,7 @@ pub struct WasapiCapture {
     thread: Option<JoinHandle<()>>,
 }
 
-pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     let source_type = SourceType::parse(source)?;
     let stop = Arc::new(Event::new(true));
     let restart = Arc::new(Event::new(true));
@@ -369,7 +372,7 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
         std::thread::Builder::new()
             .name("win-wasapi: capture thread".into())
             .spawn(move || capture_thread(source_type, hub, &stop, &restart, &state))
-            .map_err(|e| e.to_string())?
+            .map_err(|e| msg::SYSTEM.detail(e))?
     };
 
     Ok(Box::new(WasapiCapture {
@@ -445,7 +448,7 @@ fn capture_thread(
                     } else if ret.0 == WAIT_OBJECT_0.0 + 1 || ret == WAIT_TIMEOUT {
                         if !process_capture_data(&mut active, &hub) {
                             log::info!("Device invalidated. Retrying");
-                            *state.lock() = CaptureState::Retrying("Device disconnected".into());
+                            *state.lock() = CaptureState::Retrying(msg::DEVICE_DISCONNECTED.into());
                             break;
                         }
                     } else {
@@ -487,25 +490,25 @@ fn capture_thread(
 }
 
 /// `WASAPISource::Initialize` for device sources.
-fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<ActiveCapture, String> {
-    let en = enumerator().map_err(|e| hr("Failed to create enumerator", e))?;
+fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<ActiveCapture, Message> {
+    let en = enumerator().map_err(|e| hr(msg::WASAPI_ENUMERATOR, e))?;
     // SAFETY: COM calls on valid objects throughout.
     unsafe {
         let device = match source_type {
             SourceType::DefaultOutput => en
                 .GetDefaultAudioEndpoint(eRender, eConsole)
-                .map_err(|e| hr("Failed GetDefaultAudioEndpoint", e))?,
+                .map_err(|e| hr(msg::WASAPI_DEFAULT_ENDPOINT, e))?,
             SourceType::DeviceOutput(id) | SourceType::Input(id) => en
                 .GetDevice(&HSTRING::from(id.as_str()))
-                .map_err(|e| hr("Failed to enumerate device", e))?,
+                .map_err(|e| hr(msg::WASAPI_ENUMERATE_DEVICE, e))?,
         };
 
         receive.reset();
 
         let client: IAudioClient = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| hr("Failed to activate client context", e))?;
-        let mix = MixFormat::get(&client).map_err(|e| hr("Failed to get mix format", e))?;
+            .map_err(|e| hr(msg::WASAPI_ACTIVATE_CLIENT, e))?;
+        let mix = MixFormat::get(&client).map_err(|e| hr(msg::WASAPI_MIX_FORMAT, e))?;
 
         // `InitFormat`: WASAPI is always float.
         let spec = AudioSpec {
@@ -527,7 +530,7 @@ fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<Activ
                 mix.0,
                 None,
             )
-            .map_err(|e| hr("Failed to initialize audio client", e))?;
+            .map_err(|e| hr(msg::WASAPI_INITIALIZE, e))?;
 
         if !source_type.is_input() {
             clear_buffer(&device)?;
@@ -535,13 +538,13 @@ fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<Activ
 
         let capture: IAudioCaptureClient = client
             .GetService()
-            .map_err(|e| hr("Failed to create capture context", e))?;
+            .map_err(|e| hr(msg::WASAPI_CAPTURE_CLIENT, e))?;
         client
             .SetEventHandle(receive.0)
-            .map_err(|e| hr("Failed to set event handle", e))?;
+            .map_err(|e| hr(msg::WASAPI_EVENT_HANDLE, e))?;
         client
             .Start()
-            .map_err(|e| hr("Failed to start capture client", e))?;
+            .map_err(|e| hr(msg::WASAPI_START_CAPTURE, e))?;
 
         log::info!(
             "WASAPI: Device '{}' [{} Hz] initialized",
@@ -559,13 +562,13 @@ fn initialize_capture(source_type: &SourceType, receive: &Event) -> Result<Activ
 }
 
 /// `WASAPISource::ClearBuffer`, the "silent loopback fix".
-fn clear_buffer(device: &IMMDevice) -> Result<(), String> {
+fn clear_buffer(device: &IMMDevice) -> Result<(), Message> {
     // SAFETY: COM calls on valid objects.
     unsafe {
         let client: IAudioClient = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| hr("Failed to activate client context", e))?;
-        let mix = MixFormat::get(&client).map_err(|e| hr("Failed to get mix format", e))?;
+            .map_err(|e| hr(msg::WASAPI_ACTIVATE_CLIENT, e))?;
+        let mix = MixFormat::get(&client).map_err(|e| hr(msg::WASAPI_MIX_FORMAT, e))?;
         client
             .Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -575,16 +578,16 @@ fn clear_buffer(device: &IMMDevice) -> Result<(), String> {
                 mix.0,
                 None,
             )
-            .map_err(|e| hr("Failed to initialize audio client", e))?;
+            .map_err(|e| hr(msg::WASAPI_INITIALIZE, e))?;
         let frames = client
             .GetBufferSize()
-            .map_err(|e| hr("Failed to get buffer size", e))?;
+            .map_err(|e| hr(msg::WASAPI_BUFFER_SIZE, e))?;
         let render: IAudioRenderClient = client
             .GetService()
-            .map_err(|e| hr("Failed to get render client", e))?;
+            .map_err(|e| hr(msg::WASAPI_RENDER_CLIENT, e))?;
         let buffer = render
             .GetBuffer(frames)
-            .map_err(|e| hr("Failed to get buffer", e))?;
+            .map_err(|e| hr(msg::WASAPI_GET_BUFFER, e))?;
         std::ptr::write_bytes(buffer, 0, frames as usize * mix.wfex().nBlockAlign as usize);
         let _ = render.ReleaseBuffer(frames, 0);
     }
@@ -648,8 +651,19 @@ fn process_capture_data(active: &mut ActiveCapture, hub: &SourceHub) -> bool {
 struct MonitorClient {
     client: Com<IAudioClient>,
     render: Com<IAudioRenderClient>,
+    clock: Com<IAudioClock>,
+    /// Units per second of the clock's position.
+    clock_rate: u64,
+    /// Frames handed to the device so far.
+    written: u64,
+    drift: DriftControl,
     resampler: Resampler,
     channels: usize,
+    rate: u32,
+    /// Size of the device buffer, to tell a full one from a broken one.
+    buffer_frames: u32,
+    /// Packets skipped because the device had no room left.
+    skipped: u64,
     format: String,
 }
 
@@ -661,7 +675,6 @@ impl Drop for MonitorClient {
 }
 
 pub struct WasapiMonitor {
-    device_id: String,
     shared: Arc<OutputShared>,
     /// `playback_mutex`, taken with `TryAcquireSRWLockExclusive`.
     playback: Mutex<Option<MonitorClient>>,
@@ -673,14 +686,13 @@ pub fn create_monitor(
     source: &str,
     device: &str,
     shared: Arc<OutputShared>,
-) -> Result<MonitorInit, String> {
+) -> Result<MonitorInit, Message> {
     if captured_output(source).as_deref() == Some(device) {
         return Ok(MonitorInit::Ignored);
     }
     let client = init_monitor_client(device)?;
     let format = client.format.clone();
     Ok(MonitorInit::Active(Arc::new(WasapiMonitor {
-        device_id: device.to_string(),
         shared,
         playback: Mutex::new(Some(client)),
         state: Mutex::new(MonitorState::Playing { format }),
@@ -688,17 +700,17 @@ pub fn create_monitor(
 }
 
 /// `audio_monitor_init_wasapi`.
-fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
-    let en = enumerator().map_err(|e| hr("Failed to create IMMDeviceEnumerator", e))?;
+fn init_monitor_client(device_id: &str) -> Result<MonitorClient, Message> {
+    let en = enumerator().map_err(|e| hr(msg::WASAPI_MONITOR_ENUMERATOR, e))?;
     // SAFETY: COM calls on valid objects.
     unsafe {
         let device = en
             .GetDevice(&HSTRING::from(device_id))
-            .map_err(|e| hr("Failed to get device", e))?;
+            .map_err(|e| hr(msg::WASAPI_GET_DEVICE, e))?;
         let client: IAudioClient = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| hr("Failed to activate device", e))?;
-        let mix = MixFormat::get(&client).map_err(|e| hr("Failed to get mix format", e))?;
+            .map_err(|e| hr(msg::WASAPI_ACTIVATE, e))?;
+        let mix = MixFormat::get(&client).map_err(|e| hr(msg::WASAPI_MIX_FORMAT, e))?;
         client
             .Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -708,7 +720,7 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
                 mix.0,
                 None,
             )
-            .map_err(|e| hr("Failed to initialize", e))?;
+            .map_err(|e| hr(msg::WASAPI_MONITOR_INITIALIZE, e))?;
 
         let channels = mix.wfex().nChannels as usize;
         let from = AudioSpec {
@@ -721,22 +733,36 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
             speakers: monitor_speakers(mix.channel_mask(), channels),
             format: SampleFormat::Float,
         };
-        let resampler =
-            Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
+        let resampler = Resampler::adjustable(to, from).ok_or(msg::RESAMPLER)?;
 
-        client
+        let buffer_frames = client
             .GetBufferSize()
-            .map_err(|e| hr("Failed to get buffer size", e))?;
+            .map_err(|e| hr(msg::WASAPI_BUFFER_SIZE, e))?;
         let render: IAudioRenderClient = client
             .GetService()
-            .map_err(|e| hr("Failed to get IAudioRenderClient", e))?;
-        client.Start().map_err(|e| hr("Failed to start audio", e))?;
+            .map_err(|e| hr(msg::WASAPI_MONITOR_RENDER_CLIENT, e))?;
+        let clock: IAudioClock = client
+            .GetService()
+            .map_err(|e| hr(msg::WASAPI_MONITOR_RENDER_CLIENT, e))?;
+        let clock_rate = clock
+            .GetFrequency()
+            .map_err(|e| hr(msg::WASAPI_MONITOR_RENDER_CLIENT, e))?;
+        client
+            .Start()
+            .map_err(|e| hr(msg::WASAPI_START_RENDER, e))?;
 
         Ok(MonitorClient {
             client: Com(client),
             render: Com(render),
+            clock: Com(clock),
+            clock_rate: clock_rate.max(1),
+            written: 0,
+            drift: DriftControl::new(to.rate),
             resampler,
             channels,
+            rate: to.rate,
+            buffer_frames,
+            skipped: 0,
             format: describe(to.rate, channels),
         })
     }
@@ -748,30 +774,19 @@ impl AudioCallback for WasapiMonitor {
         let Some(mut playback) = self.playback.try_lock() else {
             return;
         };
-
-        if playback.is_none() {
-            match init_monitor_client(&self.device_id) {
-                Ok(client) => {
-                    *self.state.lock() = MonitorState::Playing {
-                        format: client.format.clone(),
-                    };
-                    *playback = Some(client);
-                }
-                Err(e) => {
-                    *self.state.lock() = MonitorState::Reconnecting(e);
-                    return;
-                }
-            }
-        }
-
+        // `on_audio_playback` reopens the device here, on the next packet.
+        // That is an enumerator pass, `Activate`, `Initialize` and `Start` on
+        // the capture thread, for every packet while the device is gone, and
+        // the capture and every other output wait for it. The session
+        // rebuilds the monitor from its own thread instead (`released`).
+        let Some(client) = playback.as_mut() else {
+            return;
+        };
         let vol = self.shared.volume();
-        let ok = playback
-            .as_mut()
-            .is_some_and(|client| write_packet(client, audio, &self.shared, vol).is_ok());
-        if !ok {
+        if write_packet(client, audio, &self.shared, vol).is_err() {
             // `audio_monitor_free_for_reconnect`.
             *playback = None;
-            *self.state.lock() = MonitorState::Reconnecting("Device unavailable".into());
+            *self.state.lock() = MonitorState::Reconnecting(msg::DEVICE_UNAVAILABLE.into());
         }
     }
 }
@@ -779,6 +794,25 @@ impl AudioCallback for WasapiMonitor {
 impl Monitor for WasapiMonitor {
     fn state(&self) -> MonitorState {
         self.state.lock().clone()
+    }
+
+    fn released(&self) -> bool {
+        // Only ever set by `on_audio`, which never puts a client back.
+        matches!(*self.state.lock(), MonitorState::Reconnecting(_))
+    }
+}
+
+impl MonitorClient {
+    /// Frames written and not yet played, on the device's clock. The
+    /// padding would be simpler, but the mixer takes the audio out of the
+    /// stream buffer as soon as it is written: on most devices it reads 0 or
+    /// one period whatever the drift.
+    fn queued(&self) -> windows::core::Result<f64> {
+        let mut position = 0u64;
+        // SAFETY: COM call on a started client.
+        unsafe { self.clock.0.GetPosition(&mut position, None)? };
+        let played = position as f64 / self.clock_rate as f64 * f64::from(self.rate);
+        Ok(self.written as f64 - played)
     }
 }
 
@@ -799,7 +833,30 @@ fn write_packet(
     // SAFETY: COM calls on a started render client; the buffer returned by
     // GetBuffer holds `frames * channels` float samples.
     unsafe {
-        client.client.0.GetCurrentPadding()?;
+        // `wasapi-output.c` reads the padding, ignores it, and lets
+        // `GetBuffer` fail when the device has no room: that drops the client
+        // and reopens the device, which is an audible click. With the drift
+        // loop the room no longer runs out on its own; a device that stalls
+        // still fills it. Skipping one packet lets the device drain by the
+        // same amount, and costs nothing otherwise. Anything else
+        // `GetBuffer` refuses is still a reason to reopen.
+        let pad = client.client.0.GetCurrentPadding()?;
+        if frames > client.buffer_frames.saturating_sub(pad) {
+            client.skipped += 1;
+            if client.skipped.is_power_of_two() {
+                log::warn!(
+                    "output buffer full, {} packet(s) skipped so far",
+                    client.skipped
+                );
+            }
+            return Ok(());
+        }
+        // Applied from the next packet on; see `drift.rs`.
+        let ppm = client.drift.update(client.queued()?, frames);
+        client.resampler.set_drift(ppm);
+        if let Some((ppm, off)) = client.drift.report() {
+            log::info!("output clock: {ppm:+.1} ppm, level {off:+.1} ms from its mark");
+        }
         let output = client.render.0.GetBuffer(frames)?;
 
         let samples = frames as usize * client.channels;
@@ -811,6 +868,7 @@ fn write_packet(
         std::ptr::copy_nonoverlapping(data.as_ptr(), output, samples * 4);
 
         client.render.0.ReleaseBuffer(frames, 0)?;
+        client.written += u64::from(frames);
     }
     Ok(())
 }
@@ -930,5 +988,153 @@ mod tests {
         assert!(SourceType::parse("nope").is_err());
         assert_eq!(captured_output("output:abc").as_deref(), Some("abc"));
         assert_eq!(captured_output("input:abc"), None);
+    }
+
+    /// Plays on every output of this machine but the default one, twice
+    /// at once and silently: one stream measures the drift with nothing
+    /// correcting it, the other is corrected and must end up holding its
+    /// level with a correction that matches the drift measured.
+    /// `cargo test drift_on_real_devices -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn drift_on_real_devices() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let seconds: u64 = std::env::var("DRIFT_SECONDS").map_or(150, |v| v.parse().unwrap());
+        init_thread();
+        let default = default_output_id().expect("default output");
+
+        // Keeps the default device playing so loopback delivers packets.
+        let stop = Arc::new(AtomicBool::new(false));
+        let keep = {
+            let stop = stop.clone();
+            let default = default.clone();
+            std::thread::spawn(move || {
+                init_thread();
+                let c = init_monitor_client(&default).unwrap();
+                while !stop.load(Ordering::Relaxed) {
+                    // SAFETY: COM calls on a started client.
+                    unsafe {
+                        let pad = c.client.0.GetCurrentPadding().unwrap();
+                        let room = c.buffer_frames / 5;
+                        if pad < room {
+                            let n = room - pad;
+                            let buf = c.render.0.GetBuffer(n).unwrap();
+                            std::ptr::write_bytes(buf, 0, n as usize * c.channels * 4);
+                            c.render.0.ReleaseBuffer(n, 0).unwrap();
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+
+        /// Source seconds and frames queued, per packet.
+        type Rows = Vec<(f64, f64)>;
+        struct Probe {
+            name: String,
+            client: MonitorClient,
+            rows: Rows,
+        }
+        struct Probes {
+            list: Mutex<Vec<Probe>>,
+            frames: Mutex<u64>,
+            shared: OutputShared,
+        }
+        impl AudioCallback for Probes {
+            fn on_audio(&self, audio: &ObsAudio) {
+                let t = {
+                    let mut f = self.frames.lock();
+                    *f += u64::from(audio.frames);
+                    *f as f64 / f64::from(OBS_SAMPLE_RATE)
+                };
+                for p in self.list.lock().iter_mut() {
+                    let queued = p.client.queued().unwrap();
+                    write_packet(&mut p.client, audio, &self.shared, 0.0).unwrap();
+                    p.rows.push((t, queued));
+                }
+            }
+        }
+
+        let mut list = Vec::new();
+        for o in enumerate()
+            .unwrap()
+            .outputs
+            .iter()
+            .filter(|o| o.id != default)
+        {
+            let (Ok(mut open), Ok(fixed)) =
+                (init_monitor_client(&o.id), init_monitor_client(&o.id))
+            else {
+                eprintln!("cannot open {}", o.name);
+                continue;
+            };
+            open.drift.open_loop = true;
+            for (client, kind) in [(open, "uncorrected"), (fixed, "corrected")] {
+                list.push(Probe {
+                    name: format!("{} [{kind}]", o.name),
+                    client,
+                    rows: Rows::new(),
+                });
+            }
+        }
+        let probes = Arc::new(Probes {
+            list: Mutex::new(list),
+            frames: Mutex::new(0),
+            shared: OutputShared::new(0.0, true),
+        });
+        let hub = Arc::new(SourceHub::new(Arc::default()));
+        hub.add_callback(probes.clone());
+        let capture = start_capture(DESKTOP, hub.clone()).unwrap();
+        std::thread::sleep(Duration::from_secs(seconds));
+        drop(capture);
+        stop.store(true, Ordering::Relaxed);
+        keep.join().unwrap();
+
+        /// Least-squares slope of the level, in ppm of `rate`.
+        fn slope(rows: &[(f64, f64)], rate: f64) -> f64 {
+            let n = rows.len() as f64;
+            let mx = rows.iter().map(|r| r.0).sum::<f64>() / n;
+            let my = rows.iter().map(|r| r.1).sum::<f64>() / n;
+            let sxy: f64 = rows.iter().map(|r| (r.0 - mx) * (r.1 - my)).sum();
+            let sxx: f64 = rows.iter().map(|r| (r.0 - mx) * (r.0 - mx)).sum();
+            sxy / sxx / rate * 1e6
+        }
+        let since =
+            |rows: &Rows, t: f64| -> Rows { rows.iter().filter(|r| r.0 > t).cloned().collect() };
+
+        let list = probes.list.lock();
+        let mut failures = Vec::new();
+        for pair in list.chunks(2) {
+            let [open, fixed] = pair else { continue };
+            let rate = f64::from(open.client.rate);
+            let end = open.rows.last().map_or(0.0, |r| r.0);
+            let drift = slope(&since(&open.rows, 5.0), rate);
+            let tail = since(&fixed.rows, end - 60.0);
+            let residual = slope(&tail, rate);
+            let (lo, hi) = tail
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(a, b), r| (a.min(r.1), b.max(r.1)));
+            let (level, target) = fixed.client.drift.levels();
+            let estimate = fixed.client.drift.estimate();
+            eprintln!(
+                "{}\n  measured drift {drift:+.1} ppm over {end:.0} s\n  \
+                 correction {estimate:+.1} ppm, last minute slope {residual:+.1} ppm, \
+                 level {level:.2} ms for {:.2} ms, spread {:.1} ms",
+                fixed.name,
+                target.unwrap_or(f64::NAN),
+                (hi - lo) / rate * 1000.0,
+            );
+            // What matters is that the level is held. The uncorrected
+            // stream is only a hint: once it runs dry the device plays
+            // silence and its slope no longer says much.
+            let held = target.is_some_and(|t| (level - t).abs() < 1.0);
+            let spread = (hi - lo) / rate * 1000.0;
+            if !held || spread > 5.0 {
+                failures.push(fixed.name.clone());
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
     }
 }

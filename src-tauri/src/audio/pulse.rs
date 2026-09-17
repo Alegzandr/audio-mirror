@@ -7,24 +7,34 @@
 //! - Monitoring: port of `libobs/audio-monitoring/pulse/pulseaudio-output.c`:
 //!   a corked stream with a 25 ms target, uncorked once that much audio is
 //!   queued, written from the capture thread, with the Pulse buffer grown
-//!   when audio piles up.
+//!   when audio piles up. Two deviations, both for a mirror that runs for
+//!   days: the stream is pinned to its sink (`PA_STREAM_DONT_MOVE`), so a
+//!   sink that goes away fails the stream the supervisor watches instead of
+//!   quietly taking this output's audio to another device, and the backlog
+//!   is capped, so a device that cannot keep up loses audio rather than
+//!   gaining latency without end. The resampler also follows the sink's
+//!   clock (`drift.rs`), read from the stream latency, so that cap is only
+//!   reached when a device stalls.
 //!
 //! Each side owns its threaded mainloop and context, like the two OBS
 //! wrappers (`pulse-wrapper.c` and `pulseaudio-wrapper.c`).
 
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use libpulse_sys::*;
 use parking_lot::Mutex;
 
+use super::drift::DriftControl;
 use super::format::{
     AudioSpec, ObsAudio, SampleFormat, SourceAudio, Speakers, OBS_SAMPLE_RATE, OBS_SPEAKERS,
 };
 use super::hub::{AudioCallback, SourceHub};
+use super::message::{self as msg, Message};
 use super::swr::Resampler;
 use super::volume::{scale_s16, scale_s32, scale_u8, OutputShared};
 use super::{
@@ -40,6 +50,10 @@ const MONITOR_SUFFIX: &str = ".monitor";
 const BUFFER_USEC: u64 = 25_000;
 /// `STARTUP_TIMEOUT_NS`.
 const STARTUP_TIMEOUT_NS: u64 = 500_000_000;
+/// Largest backlog a monitor keeps. Past this the device is not draining
+/// what the source produces (two clocks apart, or a device gone to sleep),
+/// and keeping the audio would only raise the latency for good.
+const MAX_BACKLOG_USEC: u64 = 400_000;
 
 pub fn init_thread() {}
 
@@ -48,7 +62,7 @@ pub fn init_thread() {}
 pub fn watch_system(
     callback: Box<dyn Fn(SystemEvent) + Send + Sync>,
 ) -> Option<Box<dyn std::any::Any + Send + Sync>> {
-    let pulse = PulseLoop::new("Audio Mirror Watcher");
+    let pulse = PulseLoop::new(c"Audio Mirror Watcher");
     let default_sink = pulse.server_info().map(|d| d.default_sink);
     let data = Box::new(WatchData {
         callback,
@@ -201,7 +215,7 @@ extern "C" fn context_state_changed(_c: *mut pa_context, userdata: *mut c_void) 
 
 impl PulseLoop {
     /// `pulse_init` / `pulseaudio_init`.
-    fn new(context_name: &str) -> PulseLoop {
+    fn new(context_name: &CStr) -> PulseLoop {
         // SAFETY: straight port of the OBS wrapper initialization.
         unsafe {
             let mainloop = pa_threaded_mainloop_new();
@@ -209,18 +223,21 @@ impl PulseLoop {
 
             pa_threaded_mainloop_lock(mainloop);
             let props = pa_proplist_new();
-            let key = |k: &[u8]| CStr::from_bytes_with_nul(k).unwrap().as_ptr();
-            let app = CString::new("Audio Mirror").unwrap();
-            let icon = CString::new("audio-mirror").unwrap();
-            let role = CString::new("production").unwrap();
-            pa_proplist_sets(props, key(b"application.name\0"), app.as_ptr());
-            pa_proplist_sets(props, key(b"application.icon_name\0"), icon.as_ptr());
-            pa_proplist_sets(props, key(b"media.role\0"), role.as_ptr());
+            pa_proplist_sets(
+                props,
+                c"application.name".as_ptr(),
+                c"Audio Mirror".as_ptr(),
+            );
+            pa_proplist_sets(
+                props,
+                c"application.icon_name".as_ptr(),
+                c"audio-mirror".as_ptr(),
+            );
+            pa_proplist_sets(props, c"media.role".as_ptr(), c"production".as_ptr());
 
-            let name = CString::new(context_name).unwrap();
             let context = pa_context_new_with_proplist(
                 pa_threaded_mainloop_get_api(mainloop),
-                name.as_ptr(),
+                context_name.as_ptr(),
                 props,
             );
             pa_context_set_state_callback(
@@ -376,7 +393,7 @@ impl PulseLoop {
     /// `pulse_stream_new`.
     fn stream_new(
         &self,
-        name: &str,
+        name: &CStr,
         spec: &pa_sample_spec,
         map: &pa_channel_map,
     ) -> *mut pa_stream {
@@ -384,7 +401,6 @@ impl PulseLoop {
             return ptr::null_mut();
         }
         let _g = self.lock();
-        let name = CString::new(name).unwrap();
         // SAFETY: context used under the lock.
         unsafe {
             let props = pa_proplist_new();
@@ -398,13 +414,13 @@ impl PulseLoop {
 /// Capture side, `pulse-wrapper.c`.
 fn capture_loop() -> &'static PulseLoop {
     static LOOP: OnceLock<PulseLoop> = OnceLock::new();
-    LOOP.get_or_init(|| PulseLoop::new("Audio Mirror"))
+    LOOP.get_or_init(|| PulseLoop::new(c"Audio Mirror"))
 }
 
 /// Monitoring side, `pulseaudio-wrapper.c`.
 fn monitor_loop() -> &'static PulseLoop {
     static LOOP: OnceLock<PulseLoop> = OnceLock::new();
-    LOOP.get_or_init(|| PulseLoop::new("Audio Mirror Monitor"))
+    LOOP.get_or_init(|| PulseLoop::new(c"Audio Mirror Monitor"))
 }
 
 struct CallbackData<'a, T> {
@@ -602,11 +618,9 @@ fn sample_spec(info: &StreamInfo) -> pa_sample_spec {
 // Devices
 // ---------------------------------------------------------------------------
 
-pub fn enumerate() -> Result<DeviceList, String> {
+pub fn enumerate() -> Result<DeviceList, Message> {
     let pulse = capture_loop();
-    let defaults = pulse
-        .server_info()
-        .ok_or_else(|| "PulseAudio is not available".to_string())?;
+    let defaults = pulse.server_info().ok_or(msg::PULSE_UNAVAILABLE)?;
     let desktop_monitor = format!("{}{MONITOR_SUFFIX}", defaults.default_sink);
 
     let mut list = DeviceList::default();
@@ -652,19 +666,24 @@ pub fn enumerate() -> Result<DeviceList, String> {
 
 /// Pulse source name recorded by a source id, and whether that source is
 /// an output capture (`OBS_SOURCE_DO_NOT_SELF_MONITOR`).
-fn resolve_source(source: &str, pulse: &PulseLoop) -> Result<(String, bool), String> {
+fn resolve_source(source: &str, pulse: &PulseLoop) -> Result<(String, bool), Message> {
     if source == DESKTOP {
-        let defaults = pulse
-            .server_info()
-            .ok_or_else(|| "Unable to get server info".to_string())?;
+        let defaults = pulse.server_info().ok_or(msg::SERVER_INFO)?;
         Ok((format!("{}{MONITOR_SUFFIX}", defaults.default_sink), true))
     } else if let Some(name) = source.strip_prefix(OUTPUT_PREFIX) {
         Ok((name.to_string(), true))
     } else if let Some(name) = source.strip_prefix(INPUT_PREFIX) {
         Ok((name.to_string(), false))
     } else {
-        Err(format!("Unknown source {source}"))
+        Err(msg::UNKNOWN_SOURCE.detail(source))
     }
+}
+
+/// A device name on its way to the C API. Names reach us from the settings
+/// file, so a malformed one is an error the panel can show, never a panic on
+/// the thread that owns every device.
+fn device_name(name: &str) -> Result<CString, Message> {
+    CString::new(name).map_err(|_| msg::INVALID_DEVICE_NAME.detail(name))
 }
 
 /// `devices_match` of the Pulse monitoring backend.
@@ -748,25 +767,24 @@ extern "C" fn capture_state_changed(s: *mut pa_stream, userdata: *mut c_void) {
                 format: describe(data.spec.rate, data.spec.speakers.channels()),
             };
         } else if state == PA_STREAM_FAILED || state == PA_STREAM_TERMINATED {
-            *data.state.lock() = CaptureState::Failed("Device disconnected".into());
+            *data.state.lock() = CaptureState::Failed(msg::DEVICE_DISCONNECTED.into());
         }
         capture_loop().signal();
     }
 }
 
 /// `pulse_start_recording`.
-pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     let pulse = capture_loop();
     let (device, is_output) = resolve_source(source, pulse)?;
+    let device_c = device_name(&device)?;
     let is_default = source == DESKTOP;
 
-    let info = pulse
-        .source_info(&device)
-        .ok_or_else(|| "An error occurred while getting the source info".to_string())?;
+    let info = pulse.source_info(&device).ok_or(msg::SOURCE_INFO)?;
     let spec = sample_spec(&info);
     // SAFETY: plain value check.
     if unsafe { pa_sample_spec_valid(&spec) } == 0 {
-        return Err("Sample spec is not valid".into());
+        return Err(msg::SAMPLE_SPEC.into());
     }
     let speakers = Speakers::from_channels(info.channels as usize);
     let map = channel_map(speakers);
@@ -787,15 +805,15 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
 
     let stream = pulse.stream_new(
         if is_output {
-            "Desktop Audio"
+            c"Desktop Audio"
         } else {
-            "Audio Input"
+            c"Audio Input"
         },
         &spec,
         &map,
     );
     if stream.is_null() {
-        return Err("Unable to create stream".into());
+        return Err(msg::STREAM_CREATE.into());
     }
     data.stream = stream;
     let userdata = &mut *data as *mut CaptureData as *mut c_void;
@@ -817,12 +835,11 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
         if !is_default {
             flags |= PA_STREAM_DONT_MOVE;
         }
-        let dev = CString::new(device.as_str()).unwrap();
-        if pa_stream_connect_record(stream, dev.as_ptr(), &attr, flags) < 0 {
+        if pa_stream_connect_record(stream, device_c.as_ptr(), &attr, flags) < 0 {
             pa_stream_set_read_callback(stream, None, ptr::null_mut());
             pa_stream_set_state_callback(stream, None, ptr::null_mut());
             pa_stream_unref(stream);
-            return Err("Unable to connect to stream".into());
+            return Err(msg::STREAM_CONNECT.into());
         }
     }
 
@@ -868,19 +885,35 @@ struct MonitorStream {
     format: pa_sample_format_t,
     bytes_per_frame: usize,
     new_data: VecDeque<u8>,
+    /// Cap on `new_data`, from [`MAX_BACKLOG_USEC`].
+    max_backlog: usize,
+    rate: u32,
+    drift: DriftControl,
     resampler: Resampler,
-    scratch: Vec<u8>,
 }
 
 // SAFETY: the stream is only touched under the monitor mainloop lock.
 unsafe impl Send for MonitorStream {}
+
+/// The playback stream, kept aside from `playback` so its state can be read
+/// without waiting for the capture thread to finish a write. Set once at
+/// creation and never changed.
+struct StreamHandle(*mut pa_stream);
+
+// SAFETY: only dereferenced under the monitor mainloop lock.
+unsafe impl Send for StreamHandle {}
+unsafe impl Sync for StreamHandle {}
 
 pub struct PulseMonitor {
     device: String,
     shared: Arc<OutputShared>,
     /// `playback_mutex`.
     playback: Mutex<MonitorStream>,
+    handle: StreamHandle,
     format: String,
+    /// Frames dropped: the write lock was held, or the backlog was cut back.
+    /// Logged on powers of two, like the skipped packets of `wasapi.rs`.
+    dropped: AtomicU64,
 }
 
 /// `audio_monitor_init`.
@@ -888,24 +921,21 @@ pub fn create_monitor(
     source: &str,
     device: &str,
     shared: Arc<OutputShared>,
-) -> Result<MonitorInit, String> {
+) -> Result<MonitorInit, Message> {
     if let Ok((source_name, true)) = resolve_source(source, capture_loop()) {
         if devices_match(&source_name, device) {
             return Ok(MonitorInit::Ignored);
         }
     }
 
+    let device_c = device_name(device)?;
     let pulse = monitor_loop();
-    pulse
-        .server_info()
-        .ok_or_else(|| "Unable to get server info".to_string())?;
-    let info = pulse
-        .sink_info(device)
-        .ok_or_else(|| "An error occurred while getting the source info".to_string())?;
+    pulse.server_info().ok_or(msg::SERVER_INFO)?;
+    let info = pulse.sink_info(device).ok_or(msg::SOURCE_INFO)?;
     let spec = sample_spec(&info);
     // SAFETY: plain value check.
     if unsafe { pa_sample_spec_valid(&spec) } == 0 {
-        return Err("Sample spec is not valid".into());
+        return Err(msg::SAMPLE_SPEC.into());
     }
 
     let speakers = Speakers::from_channels(info.channels as usize);
@@ -919,13 +949,12 @@ pub fn create_monitor(
         speakers,
         format: obs_format(info.format).unwrap_or(SampleFormat::Float),
     };
-    let resampler =
-        Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
+    let resampler = Resampler::adjustable(to, from).ok_or(msg::RESAMPLER)?;
 
     let map = channel_map(speakers);
-    let stream = pulse.stream_new("Audio Mirror", &spec, &map);
+    let stream = pulse.stream_new(c"Audio Mirror", &spec, &map);
     if stream.is_null() {
-        return Err("Unable to create stream".into());
+        return Err(msg::STREAM_CREATE.into());
     }
 
     // SAFETY: spec is valid.
@@ -936,20 +965,26 @@ pub fn create_monitor(
         prebuf: u32::MAX,
         tlength: unsafe { pa_usec_to_bytes(BUFFER_USEC, &spec) } as u32,
     };
-    let flags =
-        PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_AUTO_TIMING_UPDATE | PA_STREAM_START_CORKED;
+    // `DONT_MOVE` is ours. Pulse moves a stream whose sink disappears to
+    // the fallback sink and leaves it READY, which for a mirror means this
+    // output's audio silently joining another one, twice on the same
+    // device and with no way to tell. Pinned, the stream fails instead and
+    // the supervisor rebuilds the monitor when the device comes back.
+    let flags = PA_STREAM_INTERPOLATE_TIMING
+        | PA_STREAM_AUTO_TIMING_UPDATE
+        | PA_STREAM_START_CORKED
+        | PA_STREAM_DONT_MOVE;
 
     if !pulse.context_ready() {
-        return Err("Unable to connect to stream".into());
+        return Err(msg::STREAM_CONNECT.into());
     }
     {
         let _g = pulse.lock();
-        let dev = CString::new(device).unwrap();
         // SAFETY: stream connected under the lock.
         let ret = unsafe {
             pa_stream_connect_playback(
                 stream,
-                dev.as_ptr(),
+                device_c.as_ptr(),
                 &attr,
                 flags,
                 ptr::null(),
@@ -962,7 +997,7 @@ pub fn create_monitor(
                 pa_stream_disconnect(stream);
                 pa_stream_unref(stream);
             }
-            return Err("Unable to connect to stream".into());
+            return Err(msg::STREAM_CONNECT.into());
         }
     }
 
@@ -970,6 +1005,7 @@ pub fn create_monitor(
     Ok(MonitorInit::Active(Arc::new(PulseMonitor {
         device: device.to_string(),
         shared,
+        handle: StreamHandle(stream),
         playback: Mutex::new(MonitorStream {
             stream,
             attr,
@@ -977,33 +1013,100 @@ pub fn create_monitor(
             // SAFETY: valid spec.
             bytes_per_frame: unsafe { pa_frame_size(&spec) },
             new_data: VecDeque::new(),
+            // SAFETY: valid spec.
+            max_backlog: unsafe { pa_usec_to_bytes(MAX_BACKLOG_USEC, &spec) },
+            rate: info.rate,
+            drift: DriftControl::new(info.rate),
             resampler,
-            scratch: Vec::new(),
         }),
         format: describe(info.rate, info.channels as usize),
+        dropped: AtomicU64::new(0),
     })))
 }
 
 impl PulseMonitor {
-    /// `do_stream_write`.
-    fn stream_write(&self) {
+    /// Counts dropped frames, logging on powers of two so a drift leaves a
+    /// handful of lines rather than one per packet.
+    fn note_drop(&self, frames: usize) {
+        if frames == 0 {
+            return;
+        }
+        let total = self.dropped.fetch_add(frames as u64, Ordering::Relaxed) + frames as u64;
+        if total.is_power_of_two() {
+            log::warn!("'{}': {total} frames dropped so far", self.device);
+        }
+    }
+
+    /// Frames queued ahead of the sink before the last `written` frames:
+    /// the backlog here plus the stream latency, which Pulse interpolates
+    /// on the sink's clock. `None` until Pulse has timing for the stream.
+    ///
+    /// # Safety
+    /// Called under the monitor mainloop lock.
+    unsafe fn queued(data: &MonitorStream, written: u32) -> Option<f64> {
+        let mut usec: pa_usec_t = 0;
+        let mut negative: c_int = 0;
+        // SAFETY: the caller holds the mainloop lock.
+        if unsafe { pa_stream_get_latency(data.stream, &mut usec, &mut negative) } != 0 {
+            return None;
+        }
+        let latency = usec as f64 * f64::from(data.rate) / 1e6;
+        let latency = if negative != 0 { -latency } else { latency };
+        let backlog = (data.new_data.len() / data.bytes_per_frame.max(1)) as f64;
+        Some(backlog - f64::from(written) + latency)
+    }
+
+    /// `do_stream_write`. `written` is the number of frames the capture
+    /// thread just added to the backlog.
+    fn stream_write(&self, written: u32) {
         let pulse = monitor_loop();
         let _g = pulse.lock();
         let mut guard = self.playback.lock();
         let data = &mut *guard;
 
+        // The device is not taking what the source produces: drop the
+        // oldest audio rather than play further and further behind it.
+        if data.new_data.len() > data.max_backlog {
+            let excess = data.new_data.len() - data.max_backlog;
+            data.new_data.drain(..excess);
+            self.note_drop(excess / data.bytes_per_frame.max(1));
+        }
+
         // SAFETY: stream used under the monitor mainloop lock.
         unsafe {
-            // Grow the Pulse buffer when a large backlog built up.
+            // Grow the Pulse buffer when a large backlog built up. It is
+            // never shrunk back, exactly as in `do_stream_write`, so the
+            // added latency stays until the monitor is built again. Worth a
+            // line in the log, because nothing else says it happened.
             if data.new_data.len() > data.attr.tlength as usize * 2 {
+                log::info!(
+                    "'{}': buffer grown from {} to {} bytes, latency follows",
+                    self.device,
+                    data.attr.tlength,
+                    data.new_data.len()
+                );
                 data.attr.fragsize = u32::MAX;
                 data.attr.maxlength = u32::MAX;
                 data.attr.prebuf = u32::MAX;
                 data.attr.minreq = u32::MAX;
-                data.attr.tlength = data.new_data.len() as u32;
+                data.attr.tlength = data.new_data.len().min(data.max_backlog) as u32;
                 let op = pa_stream_set_buffer_attr(data.stream, &data.attr, None, ptr::null_mut());
                 if !op.is_null() {
                     pa_operation_unref(op);
+                }
+            }
+
+            // Applied from the next packet on; see `drift.rs`.
+            if written > 0 && pa_stream_is_corked(data.stream) == 0 {
+                if let Some(queued) = Self::queued(data, written) {
+                    let ppm = data.drift.update(queued, written);
+                    data.resampler.set_drift(ppm);
+                    if let Some((ppm, off)) = data.drift.report() {
+                        log::info!(
+                            "'{}': clock {ppm:+.1} ppm, level {off:+.1} ms from its mark",
+                            self.device
+                        );
+                    }
                 }
             }
 
@@ -1031,9 +1134,13 @@ impl PulseMonitor {
                     return;
                 }
                 let out = std::slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_fill);
-                for (dst, src) in out.iter_mut().zip(data.new_data.drain(..bytes_to_fill)) {
-                    *dst = src;
-                }
+                // A ring buffer is at most two runs, so this is two memcpy
+                // rather than a branch per byte, inside the write callback.
+                let (front, back) = data.new_data.as_slices();
+                let head = front.len().min(bytes_to_fill);
+                out[..head].copy_from_slice(&front[..head]);
+                out[head..].copy_from_slice(&back[..bytes_to_fill - head]);
+                data.new_data.drain(..bytes_to_fill);
                 pa_stream_write(
                     data.stream,
                     buffer,
@@ -1050,40 +1157,65 @@ impl PulseMonitor {
 impl AudioCallback for PulseMonitor {
     /// `on_audio_playback`.
     fn on_audio(&self, audio: &ObsAudio) {
-        if let Some(mut data) = self.playback.try_lock() {
-            let input = [
-                audio.planes[0].as_ptr() as *const u8,
-                audio.planes[1].as_ptr() as *const u8,
-            ];
-            if let Some(frames) = data.resampler.resample(&input, audio.frames) {
-                let bytes = data.bytes_per_frame * frames as usize;
-                let vol = self.shared.volume();
-                let data = &mut *data;
-                data.scratch.clear();
-                data.scratch
-                    .extend_from_slice(&data.resampler.plane(0)[..bytes]);
-                let samples = &mut data.scratch[..];
-                match data.format {
-                    PA_SAMPLE_FLOAT32LE => {
-                        let (_, floats, _) = unsafe { samples.align_to_mut::<f32>() };
-                        self.shared.apply_f32(floats, vol);
-                    }
-                    PA_SAMPLE_U8 => self.shared.record_peak(scale_u8(samples, vol)),
-                    PA_SAMPLE_S16LE => self.shared.record_peak(scale_s16(samples, vol)),
-                    PA_SAMPLE_S32LE => self.shared.record_peak(scale_s32(samples, vol)),
-                    _ => {}
+        let Some(mut data) = self.playback.try_lock() else {
+            // `TryAcquireSRWLockExclusive` in OBS: the packet is skipped,
+            // which is audible, so it is counted.
+            self.note_drop(audio.frames as usize);
+            self.stream_write(0);
+            return;
+        };
+        let input = [
+            audio.planes[0].as_ptr() as *const u8,
+            audio.planes[1].as_ptr() as *const u8,
+        ];
+        let mut written = 0;
+        if let Some(frames) = data.resampler.resample(&input, audio.frames) {
+            written = frames;
+            let bytes = data.bytes_per_frame * frames as usize;
+            let vol = self.shared.volume();
+            // Disjoint fields, so the samples are scaled in place and
+            // handed over without the round trip through a scratch copy.
+            let data = &mut *data;
+            let format = data.format;
+            let samples = &mut data.resampler.plane_mut(0)[..bytes];
+            match format {
+                PA_SAMPLE_FLOAT32LE => {
+                    // SAFETY: the resampler hands out planes aligned for
+                    // `f32`, so this covers all of them.
+                    let (_, floats, _) = unsafe { samples.align_to_mut::<f32>() };
+                    self.shared.apply_f32(floats, vol);
                 }
-                data.new_data.extend(data.scratch.iter().copied());
+                PA_SAMPLE_U8 => self.shared.record_peak(scale_u8(samples, vol)),
+                PA_SAMPLE_S16LE => self.shared.record_peak(scale_s16(samples, vol)),
+                PA_SAMPLE_S32LE => self.shared.record_peak(scale_s32(samples, vol)),
+                _ => {}
             }
+            data.new_data.extend(samples.iter().copied());
         }
-        self.stream_write();
+        drop(data);
+        self.stream_write(written);
     }
 }
 
 impl Monitor for PulseMonitor {
+    /// PulseAudio moves a stream whose sink went away to FAILED or
+    /// TERMINATED and never plays it again. `pulseaudio-output.c` never
+    /// reads the stream state back, because OBS rebuilds a monitor only
+    /// from `obs_reset_audio_monitoring`; without this the output would
+    /// stay silent while the panel reported it as playing. See the retry
+    /// deviation on `MONITOR_RETRY`.
     fn state(&self) -> MonitorState {
-        MonitorState::Playing {
-            format: self.format.clone(),
+        let pulse = monitor_loop();
+        let _g = pulse.lock();
+        // SAFETY: the stream lives as long as this monitor and is read here
+        // under the mainloop lock.
+        let state = unsafe { pa_stream_get_state(self.handle.0) };
+        if state == PA_STREAM_READY || state == PA_STREAM_CREATING {
+            MonitorState::Playing {
+                format: self.format.clone(),
+            }
+        } else {
+            MonitorState::Reconnecting(msg::DEVICE_DISCONNECTED.into())
         }
     }
 }

@@ -7,7 +7,8 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "check:ui": "tsc -p tsconfig.json"
+    "check:ui": "tsc -p tsconfig.json",
+    "test": "node --test \"tests/ui/**/*.test.js\""
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",

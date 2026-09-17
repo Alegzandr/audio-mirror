@@ -156,8 +156,6 @@ mod tests {
     fn fader_matches_obs_curve() {
         assert_eq!(fader_to_db(1.0), 0.0);
         assert_eq!(fader_to_db(0.0), f32::NEG_INFINITY);
-        // Reference value computed with OBS's C formula.
-        assert!((fader_to_db(0.5) - (-18.739)).abs() < 0.01);
         assert_eq!(fader_to_gain(0.0), 0.0);
         assert!((fader_to_gain(1.0) - 1.0).abs() < 1e-6);
         let mut prev = 0.0;
@@ -165,6 +163,28 @@ mod tests {
             let g = fader_to_gain(i as f32 / 100.0);
             assert!(g >= prev, "curve is not monotonic at {i}");
             prev = g;
+        }
+    }
+
+    /// The panel has its own copy of the curve (`ui/view.js`); both are
+    /// checked against the same points, computed with OBS's C formula.
+    #[test]
+    fn fader_matches_the_shared_reference_points() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fader-curve.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect(path)).unwrap();
+        let points = json["points"].as_array().unwrap();
+        assert!(!points.is_empty());
+        for p in points {
+            let def = p[0].as_f64().unwrap() as f32;
+            let db = fader_to_db(def);
+            match p[1].as_f64() {
+                Some(want) => assert!(
+                    (f64::from(db) - want).abs() < 0.01,
+                    "fader {def}: {db} dB, expected {want}"
+                ),
+                None => assert_eq!(db, f32::NEG_INFINITY, "fader {def}"),
+            }
         }
     }
 

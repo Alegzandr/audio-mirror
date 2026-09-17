@@ -15,61 +15,40 @@ const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
  */
 const find = (root, selector) => /** @type {HTMLElement} */ (root.querySelector(selector));
 
-const { t, engineMessage, formatNumber } = window.I18n;
+const { t } = window.I18n;
+const {
+  faderToDb,
+  formatDb,
+  meterTarget,
+  meterFall,
+  meterDb,
+  sourceName,
+  outputRows,
+  capturedOutput,
+  runState,
+  outputState,
+  retrying,
+} = window.View;
 
 /**
  * A level meter: `el` is the bar scaled to `level`, which falls toward `target`.
  * @typedef {{ el: HTMLElement, meter: HTMLElement, label?: HTMLElement, level: number, target?: number }} Meter
  */
 
-/**
- * An output row: a present device, or an enabled one that is unplugged.
- * @typedef {OutputInfo & { absent?: boolean }} OutputRow
- */
-
-const MINUS = "−";
-const DEVICE_REFRESH_MS = 5000;
+/** Safety net only: the engine says when the devices changed. */
+const DEVICE_REFRESH_MS = 30000;
 const STATUS_POLL_MS = 100;
-
-/** @type {Record<NodeState, string>} */
-const STATE_LABELS = {
-  idle: t("state.idle"),
-  starting: t("state.starting"),
-  playing: t("state.playing"),
-  error: t("state.error"),
-  blocked: t("state.blocked"),
-};
 
 /** @type {Snapshot} Set by `load` before anything reads it. */
 let snapshot;
 /** @type {Status | null} */
 let status = null;
+/** Last device change the engine reported, so the list is re-read once. */
+let devicesRevision = -1;
 /** @type {Map<string, HTMLElement>} */
 const rows = new Map();
 /** @type {Map<string, Meter>} */
 const meters = new Map();
-
-/**
- * OBS logarithmic fader curve, same as the Rust engine.
- * @param {number} def
- */
-function faderToDb(def) {
-  if (def >= 1) return 0;
-  if (def <= 0) return -Infinity;
-  return -102 * Math.pow(17, -def) + 6;
-}
-
-/** @param {number} db */
-function formatDb(db) {
-  if (!Number.isFinite(db) || db <= -96) return `${MINUS}∞ dB`;
-  const abs = formatNumber(Math.abs(db));
-  return db < -0.05 ? `${MINUS}${abs} dB` : `${abs} dB`;
-}
-
-/** @param {number} peak */
-function peakToDb(peak) {
-  return peak > 0 ? 20 * Math.log10(peak) : -Infinity;
-}
 
 /**
  * @template {Command} K
@@ -160,18 +139,6 @@ function renderSource() {
   select.value = current;
 }
 
-/** The engine names the desktop source "Default output (<device>)". */
-const DESKTOP_PREFIX = "Default output";
-
-/** @param {SourceInfo} s */
-function sourceName(s) {
-  let name = s.name;
-  if (s.kind === "desktop" && name.startsWith(DESKTOP_PREFIX)) {
-    name = t("source.desktop") + name.slice(DESKTOP_PREFIX.length);
-  }
-  return s.is_default ? t("device.default", { name }) : name;
-}
-
 /** @param {string} id */
 function outputConfig(id) {
   return snapshot.config.outputs.find((o) => o.id === id);
@@ -181,21 +148,9 @@ function enabledCount() {
   return snapshot.config.outputs.filter((o) => o.enabled).length;
 }
 
-/** Output recorded by the current source: playing into it would feed back. */
-function capturedOutput() {
-  const src = snapshot.devices.sources.find((s) => s.id === snapshot.config.source);
-  return src ? src.captures_output : null;
-}
-
 function renderOutputs() {
   const list = $("outputs");
-  const present = snapshot.devices.outputs;
-  /** @type {OutputRow[]} */
-  const absent = snapshot.config.outputs
-    .filter((o) => o.enabled && !present.some((d) => d.id === o.id))
-    .map((o) => ({ id: o.id, name: o.name || t("output.unknown"), is_default: false, absent: true }));
-  /** @type {OutputRow[]} */
-  const all = [...present, ...absent];
+  const all = outputRows(snapshot.devices, snapshot.config);
 
   list.replaceChildren();
   rows.clear();
@@ -216,7 +171,7 @@ function renderOutputs() {
     list.append(p);
   }
 
-  const captured = capturedOutput();
+  const captured = capturedOutput(snapshot.devices, snapshot.config);
   const tpl = /** @type {HTMLTemplateElement} */ ($("output-row"));
   all.forEach((dev, i) => {
     const node = /** @type {HTMLElement} */ (tpl.content.firstElementChild?.cloneNode(true));
@@ -319,22 +274,21 @@ async function poll() {
     return;
   }
   applyStatus();
+  // The backends already know when a device appears or goes away, so the
+  // list is re-read on their word rather than on a timer.
+  if (status.devices_revision !== devicesRevision) {
+    const first = devicesRevision === -1;
+    devicesRevision = status.devices_revision;
+    if (!first) refresh();
+  }
 }
 
 function applyStatus() {
   const live = status && status.running ? status : null;
   const src = live ? live.source : null;
 
-  if (!live) {
-    setRunState(t("run.off"), "muted");
-  } else if (live.source.state === "error") {
-    setRunState(t("run.sourceError"), "error");
-  } else {
-    const playing = live.outputs.filter((o) => o.state === "playing").length;
-    const total = live.outputs.length;
-    const text = playing === total ? t("run.mirroring", { count: total }) : t("run.partial", { playing, total });
-    setRunState(text, "on");
-  }
+  const run = runState(live);
+  setRunState(run.text, run.tone);
 
   const err = $("source-error");
   const msg = src && src.state === "error" ? retrying(src.message) : "";
@@ -347,33 +301,17 @@ function applyStatus() {
     if (node.dataset.absent === "true") continue;
     const enabled = node.dataset.enabled === "true";
     const st = byId.get(id);
-    if (!enabled || !st) {
-      setState(node, "", "muted");
-      if (!(/** @type {HTMLInputElement} */ (find(node, ".output-enabled")).disabled)) setDetail(node, "");
-      pushLevel(id, 0);
-      continue;
-    }
-    const muted = node.dataset.muted === "true";
-    let label = STATE_LABELS[st.state] || st.state;
-    let tone = st.state === "playing" ? "on" : "muted";
-    if (st.state === "error") tone = "error";
-    if (muted && st.state === "playing") {
-      label = t("output.muted");
-      tone = "muted";
-    }
+    const { label, tone, detail } = outputState(st, {
+      enabled,
+      muted: node.dataset.muted === "true",
+    });
     setState(node, label, tone);
-
-    let detail = "";
-    if (st.state === "error") detail = retrying(st.message);
-    if (st.state === "blocked") detail = t("output.echo");
-    setDetail(node, detail);
-    pushLevel(id, st.peak);
+    // A row whose switch is disabled carries a standing explanation (the
+    // source records it), which the status must not wipe.
+    const locked = /** @type {HTMLInputElement} */ (find(node, ".output-enabled")).disabled;
+    if (!(locked && !detail)) setDetail(node, detail);
+    pushLevel(id, enabled && st ? st.peak : 0);
   }
-}
-
-/** @param {string | null} message */
-function retrying(message) {
-  return t("error.retrying", { message: engineMessage(message) });
 }
 
 /* Meters: instant peak, smooth fall */
@@ -388,16 +326,14 @@ const sourceMeter = { el: /** @type {HTMLElement} */ ($("source-meter").firstEle
 function pushLevel(id, peak) {
   const m = id === "__source" ? sourceMeter : meters.get(id);
   if (!m) return;
-  const db = peakToDb(peak);
-  m.target = Number.isFinite(db) ? Math.min(1, Math.max(0, (db + 60) / 60)) : 0;
+  m.target = meterTarget(peak);
 }
 
 function animateMeters() {
   for (const m of [sourceMeter, ...meters.values()]) {
-    const target = m.target || 0;
-    m.level = target > m.level ? target : Math.max(target, m.level - 0.02);
+    m.level = meterFall(m.level, m.target || 0);
     m.el.style.transform = `scaleX(${m.level.toFixed(3)})`;
-    const db = m.level > 0 ? m.level * 60 - 60 : -Infinity;
+    const db = meterDb(m.level);
     const now = Number.isFinite(db) ? String(Math.round(db)) : "-60";
     if (m.meter.getAttribute("aria-valuenow") !== now) m.meter.setAttribute("aria-valuenow", now);
     if (m.label) {
@@ -461,7 +397,13 @@ $("outputs").addEventListener("change", async (e) => {
   if (!target.classList.contains("output-enabled")) return;
   const { node, id, name } = outputOf(target);
   const enabled = target.checked;
-  await call("set_output_enabled", { id, name, enabled });
+  try {
+    await call("set_output_enabled", { id, name, enabled });
+  } catch {
+    // The engine kept the old value: put the switch back where it was.
+    target.checked = !enabled;
+    return;
+  }
   localOutput(node).enabled = enabled;
   const hadNote = Boolean($("outputs").querySelector(".note"));
   if (hadNote !== !enabledCount()) {
@@ -592,10 +534,17 @@ function demoInvoke(cmd, ...args) {
     }),
     status: () => ({
       running: enabled.length > 0,
+      devices_revision: 0,
       source: { state: "playing", message: null, format: "48 kHz, stereo", peak: wave(0) },
       outputs: enabled.map((o) =>
         o.id === "wasapi:hdmi"
-          ? { id: o.id, state: "error", message: "Device disconnected", format: null, peak: 0 }
+          ? {
+              id: o.id,
+              state: "error",
+              message: { code: "deviceDisconnected", text: "Device disconnected", detail: null },
+              format: null,
+              peak: 0,
+            }
           : { id: o.id, state: "playing", message: null, format: "48 kHz, stereo", peak: wave(0) * o.fader },
       ),
     }),
