@@ -158,8 +158,17 @@ fn process_audio(st: &mut ProcessState, audio: &SourceAudio) -> Option<usize> {
         }
         None => {
             let n = audio.frames as usize;
+            // Already in the OBS format, so the backend owes us one plane per
+            // channel holding `frames` samples. Dropping a packet that does
+            // not is better than taking the capture thread down with it.
+            if audio.planes.len() < OBS_CHANNELS {
+                return None;
+            }
             for ch in 0..OBS_CHANNELS {
                 let samples = as_f32(audio.planes[ch]);
+                if samples.len() < n {
+                    return None;
+                }
                 copy_plane(&mut st.storage[ch], &samples[..n]);
             }
             n

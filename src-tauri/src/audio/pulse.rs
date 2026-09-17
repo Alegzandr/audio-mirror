@@ -875,11 +875,21 @@ struct MonitorStream {
 // SAFETY: the stream is only touched under the monitor mainloop lock.
 unsafe impl Send for MonitorStream {}
 
+/// The playback stream, kept aside from `playback` so its state can be read
+/// without waiting for the capture thread to finish a write. Set once at
+/// creation and never changed.
+struct StreamHandle(*mut pa_stream);
+
+// SAFETY: only dereferenced under the monitor mainloop lock.
+unsafe impl Send for StreamHandle {}
+unsafe impl Sync for StreamHandle {}
+
 pub struct PulseMonitor {
     device: String,
     shared: Arc<OutputShared>,
     /// `playback_mutex`.
     playback: Mutex<MonitorStream>,
+    handle: StreamHandle,
     format: String,
 }
 
@@ -970,6 +980,7 @@ pub fn create_monitor(
     Ok(MonitorInit::Active(Arc::new(PulseMonitor {
         device: device.to_string(),
         shared,
+        handle: StreamHandle(stream),
         playback: Mutex::new(MonitorStream {
             stream,
             attr,
@@ -1081,9 +1092,22 @@ impl AudioCallback for PulseMonitor {
 }
 
 impl Monitor for PulseMonitor {
+    /// PulseAudio moves a stream whose sink went away to FAILED or
+    /// TERMINATED and never plays it again. OBS only builds monitors from
+    /// the UI and so never looks; a background mirror has to, otherwise the
+    /// output stays silent while the panel reports it as playing.
     fn state(&self) -> MonitorState {
-        MonitorState::Playing {
-            format: self.format.clone(),
+        let pulse = monitor_loop();
+        let _g = pulse.lock();
+        // SAFETY: the stream lives as long as this monitor and is read here
+        // under the mainloop lock.
+        let state = unsafe { pa_stream_get_state(self.handle.0) };
+        if state == PA_STREAM_READY || state == PA_STREAM_CREATING {
+            MonitorState::Playing {
+                format: self.format.clone(),
+            }
+        } else {
+            MonitorState::Reconnecting("Device disconnected".into())
         }
     }
 }

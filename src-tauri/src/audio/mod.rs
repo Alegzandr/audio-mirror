@@ -258,6 +258,10 @@ impl Engine {
     pub fn apply(&self, cfg: EngineConfig) {
         {
             let mut shared = self.shared.lock();
+            // An output that is no longer configured keeps no controls. The
+            // audio threads hold their own `Arc`, so a monitor still being
+            // torn down is unaffected.
+            shared.retain(|id, _| cfg.outputs.iter().any(|o| &o.id == id));
             for o in &cfg.outputs {
                 let s = shared
                     .entry(o.id.clone())
@@ -321,6 +325,9 @@ enum Slot {
     Active {
         monitor: Arc<dyn Monitor>,
         callback: CallbackId,
+        /// Since when the monitor has been reporting a failed device, so a
+        /// backend that cannot reopen it on its own still gets rebuilt.
+        failing_since: Option<Instant>,
     },
     Ignored,
     Failed {
@@ -364,12 +371,19 @@ impl Session {
         self.capture_retry_at = Instant::now() + MONITOR_RETRY;
     }
 
-    /// `audio_monitor_create`.
+    /// `audio_monitor_create`. A monitor already on that output is destroyed
+    /// first, like OBS does, so the device is released before it is opened
+    /// again: a driver that only accepts one client can still be rebuilt.
     fn create_monitor(&mut self, id: &str, shared: Arc<OutputShared>) {
+        self.remove_monitor(id);
         let slot = match platform::create_monitor(&self.source, id, shared) {
             Ok(MonitorInit::Active(monitor)) => {
                 let callback = self.hub.add_callback(monitor.clone());
-                Slot::Active { monitor, callback }
+                Slot::Active {
+                    monitor,
+                    callback,
+                    failing_since: None,
+                }
             }
             Ok(MonitorInit::Ignored) => {
                 log::info!("prevented feedback loop on {id}");
@@ -383,7 +397,6 @@ impl Session {
                 }
             }
         };
-        self.remove_monitor(id);
         self.slots.insert(id.to_string(), slot);
     }
 
@@ -401,6 +414,20 @@ impl Drop for Session {
         for id in ids {
             self.remove_monitor(&id);
         }
+    }
+}
+
+/// Whether a slot must be built again now: a device that could not be opened
+/// and is due for a retry, or a monitor that has been reporting a failure for
+/// a full retry delay.
+fn slot_is_due(slot: &Slot, now: Instant) -> bool {
+    match slot {
+        Slot::Failed { retry_at, .. } => now >= *retry_at,
+        Slot::Active {
+            failing_since: Some(since),
+            ..
+        } => now >= *since + MONITOR_RETRY,
+        _ => false,
     }
 }
 
@@ -525,10 +552,29 @@ impl Supervisor {
             session.reopen_capture();
         }
 
+        // A monitor reporting a failed device is rebuilt once it has said so
+        // for a full retry delay. Backends that reopen the device themselves
+        // (WASAPI, on the next packet) clear the flag long before that, so
+        // this only fires when nothing else would.
+        for slot in session.slots.values_mut() {
+            if let Slot::Active {
+                monitor,
+                failing_since,
+                ..
+            } = slot
+            {
+                if matches!(monitor.state(), MonitorState::Reconnecting(_)) {
+                    failing_since.get_or_insert(now);
+                } else {
+                    *failing_since = None;
+                }
+            }
+        }
+
         let due: Vec<String> = session
             .slots
             .iter()
-            .filter(|(_, s)| matches!(s, Slot::Failed { retry_at, .. } if now >= *retry_at))
+            .filter(|(_, slot)| slot_is_due(slot, now))
             .map(|(id, _)| id.clone())
             .collect();
         for id in due {
@@ -623,6 +669,52 @@ mod tests {
         assert_eq!(describe(44_100, 6), "44.1 kHz, 5.1");
     }
 
+    struct FakeMonitor(MonitorState);
+
+    impl hub::AudioCallback for FakeMonitor {
+        fn on_audio(&self, _audio: &format::ObsAudio) {}
+    }
+
+    impl Monitor for FakeMonitor {
+        fn state(&self) -> MonitorState {
+            self.0.clone()
+        }
+    }
+
+    fn active_slot(failing_since: Option<Instant>) -> Slot {
+        Slot::Active {
+            monitor: Arc::new(FakeMonitor(MonitorState::Reconnecting("gone".into()))),
+            callback: 1,
+            failing_since,
+        }
+    }
+
+    #[test]
+    fn a_monitor_stuck_on_a_failed_device_is_rebuilt() {
+        let now = Instant::now();
+
+        // A device that could not be opened keeps its own retry schedule.
+        let failed = Slot::Failed {
+            error: "nope".into(),
+            retry_at: now + MONITOR_RETRY,
+        };
+        assert!(!slot_is_due(&failed, now));
+        assert!(slot_is_due(&failed, now + MONITOR_RETRY));
+
+        // A monitor that reports a failure is left alone until the retry
+        // delay has passed: backends that heal on their own get their chance.
+        assert!(!slot_is_due(&active_slot(None), now + MONITOR_RETRY * 10));
+        assert!(!slot_is_due(&active_slot(Some(now)), now));
+        assert!(!slot_is_due(
+            &active_slot(Some(now)),
+            now + MONITOR_RETRY - Duration::from_millis(1)
+        ));
+        assert!(slot_is_due(&active_slot(Some(now)), now + MONITOR_RETRY));
+
+        // An output left out on purpose is never rebuilt.
+        assert!(!slot_is_due(&Slot::Ignored, now + MONITOR_RETRY * 10));
+    }
+
     #[test]
     fn engine_starts_and_stops_without_devices() {
         let engine = Engine::new();
@@ -656,6 +748,10 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(400));
         assert!(!engine.status().running);
+        assert!(
+            engine.shared.lock().is_empty(),
+            "an output that is gone leaves no controls behind"
+        );
     }
 
     /// Needs real audio devices: `cargo test -- --ignored`. The output is

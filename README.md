@@ -185,7 +185,13 @@ Wireless devices such as Bluetooth headphones add their own delay, and Audio Mir
 **Nothing works after installing a new driver or device.**
 Right click the tray icon and choose **Restart audio**.
 
-**Still stuck?** [Open an issue](https://github.com/Alegzandr/audio-mirror/issues) with your system, the source you picked and the message shown in the panel.
+**Still stuck?** [Open an issue](https://github.com/Alegzandr/audio-mirror/issues) with your system, the source you picked and the message shown in the panel. Audio Mirror also keeps a log file, which says what each device did:
+
+| System | Folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\io.github.alegzandr.audiomirror\logs` |
+| macOS | `~/Library/Logs/io.github.alegzandr.audiomirror` |
+| Linux | `~/.local/share/io.github.alegzandr.audiomirror/logs` |
 
 ## Settings and uninstalling
 

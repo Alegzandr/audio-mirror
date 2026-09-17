@@ -461,7 +461,13 @@ $("outputs").addEventListener("change", async (e) => {
   if (!target.classList.contains("output-enabled")) return;
   const { node, id, name } = outputOf(target);
   const enabled = target.checked;
-  await call("set_output_enabled", { id, name, enabled });
+  try {
+    await call("set_output_enabled", { id, name, enabled });
+  } catch {
+    // The engine kept the old value: put the switch back where it was.
+    target.checked = !enabled;
+    return;
+  }
   localOutput(node).enabled = enabled;
   const hadNote = Boolean($("outputs").querySelector(".note"));
   if (hadNote !== !enabledCount()) {

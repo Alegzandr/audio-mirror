@@ -181,6 +181,27 @@ pub(crate) fn start(app: &AppHandle) {
     }
 }
 
+/// Writes the engine's messages to a rotating file in the app log folder, so
+/// a device that refuses to open leaves a trace to report. Without this the
+/// `log` calls spread over the audio backends go nowhere.
+fn logging<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    let mut builder = tauri_plugin_log::Builder::new()
+        .level(log::LevelFilter::Info)
+        .max_file_size(512 * 1024)
+        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+        .target(tauri_plugin_log::Target::new(
+            tauri_plugin_log::TargetKind::LogDir {
+                file_name: Some("audio-mirror".into()),
+            },
+        ));
+    if cfg!(debug_assertions) {
+        builder = builder.target(tauri_plugin_log::Target::new(
+            tauri_plugin_log::TargetKind::Stdout,
+        ));
+    }
+    builder.build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
@@ -191,6 +212,7 @@ pub fn run() {
     let lang = Lang::detect();
 
     tauri::Builder::default()
+        .plugin(logging())
         .plugin(i18n::plugin(lang))
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             // During the startup update check, the splash is already showing.
