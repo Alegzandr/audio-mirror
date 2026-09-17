@@ -617,40 +617,48 @@ unsafe extern "C" fn devices_changed(
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        let addr = address(
-            kAudioHardwarePropertyDevices,
-            kAudioObjectPropertyScopeGlobal,
-        );
-        // SAFETY: removes the listener added in `watch_system`.
-        unsafe {
-            AudioObjectRemovePropertyListener(
-                kAudioObjectSystemObject,
-                &addr,
-                devices_changed,
-                &*self.callback as *const EventCallback as *mut c_void,
-            )
-        };
+        let data = &*self.callback as *const EventCallback as *mut c_void;
+        for selector in WATCHED {
+            let addr = address(selector, kAudioObjectPropertyScopeGlobal);
+            // SAFETY: removes the listeners added in `watch_system`.
+            unsafe {
+                AudioObjectRemovePropertyListener(
+                    kAudioObjectSystemObject,
+                    &addr,
+                    devices_changed,
+                    data,
+                )
+            };
+        }
     }
 }
+
+/// The default output is watched as a plain device change: unlike
+/// `win-wasapi`, the desktop capture here is ScreenCaptureKit and does not
+/// follow it, so there is nothing to rebuild. Only the list the panel shows
+/// has to catch up.
+const WATCHED: [u32; 2] = [
+    kAudioHardwarePropertyDevices,
+    kAudioHardwarePropertyDefaultOutputDevice,
+];
 
 pub fn watch_system(callback: EventCallback) -> Option<Box<dyn std::any::Any + Send + Sync>> {
     let watcher = Watcher {
         callback: Box::new(callback),
     };
-    let addr = address(
-        kAudioHardwarePropertyDevices,
-        kAudioObjectPropertyScopeGlobal,
-    );
-    // SAFETY: the client data lives as long as the returned watcher.
-    let stat = unsafe {
-        AudioObjectAddPropertyListener(
-            kAudioObjectSystemObject,
-            &addr,
-            devices_changed,
-            &*watcher.callback as *const EventCallback as *mut c_void,
-        )
-    };
-    (stat == noErr).then(|| Box::new(watcher) as Box<dyn std::any::Any + Send + Sync>)
+    let data = &*watcher.callback as *const EventCallback as *mut c_void;
+    let mut added = 0;
+    for selector in WATCHED {
+        let addr = address(selector, kAudioObjectPropertyScopeGlobal);
+        // SAFETY: the client data lives as long as the returned watcher.
+        let stat = unsafe {
+            AudioObjectAddPropertyListener(kAudioObjectSystemObject, &addr, devices_changed, data)
+        };
+        if stat == noErr {
+            added += 1;
+        }
+    }
+    (added > 0).then(|| Box::new(watcher) as Box<dyn std::any::Any + Send + Sync>)
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,8 @@ interface Status {
   running: boolean;
   source: SourceStatus;
   outputs: OutputStatus[];
+  /** Bumped when the system reports a device change. */
+  devices_revision: number;
 }
 
 /** `updater::Progress` */

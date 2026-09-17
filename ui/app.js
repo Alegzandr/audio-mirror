@@ -28,7 +28,8 @@ const { t, engineMessage, formatNumber } = window.I18n;
  */
 
 const MINUS = "−";
-const DEVICE_REFRESH_MS = 5000;
+/** Safety net only: the engine says when the devices changed. */
+const DEVICE_REFRESH_MS = 30000;
 const STATUS_POLL_MS = 100;
 
 /** @type {Record<NodeState, string>} */
@@ -44,6 +45,8 @@ const STATE_LABELS = {
 let snapshot;
 /** @type {Status | null} */
 let status = null;
+/** Last device change the engine reported, so the list is re-read once. */
+let devicesRevision = -1;
 /** @type {Map<string, HTMLElement>} */
 const rows = new Map();
 /** @type {Map<string, Meter>} */
@@ -319,6 +322,13 @@ async function poll() {
     return;
   }
   applyStatus();
+  // The backends already know when a device appears or goes away, so the
+  // list is re-read on their word rather than on a timer.
+  if (status.devices_revision !== devicesRevision) {
+    const first = devicesRevision === -1;
+    devicesRevision = status.devices_revision;
+    if (!first) refresh();
+  }
 }
 
 function applyStatus() {
@@ -598,6 +608,7 @@ function demoInvoke(cmd, ...args) {
     }),
     status: () => ({
       running: enabled.length > 0,
+      devices_revision: 0,
       source: { state: "playing", message: null, format: "48 kHz, stereo", peak: wave(0) },
       outputs: enabled.map((o) =>
         o.id === "wasapi:hdmi"

@@ -256,6 +256,10 @@ pub struct Status {
     pub running: bool,
     pub source: SourceStatus,
     pub outputs: Vec<OutputStatus>,
+    /// Bumped every time the system says the devices changed. The panel
+    /// watches it instead of re-enumerating on a timer: the backends already
+    /// know, and enumerating is a full COM pass on Windows.
+    pub devices_revision: u64,
 }
 
 impl Default for Status {
@@ -269,6 +273,7 @@ impl Default for Status {
                 peak: 0.0,
             },
             outputs: Vec::new(),
+            devices_revision: 0,
         }
     }
 }
@@ -317,6 +322,7 @@ impl Engine {
             shared: shared.clone(),
             platform: platform.clone(),
             retry,
+            devices_revision: 0,
             cfg: None,
             session: None,
         };
@@ -548,6 +554,8 @@ struct Supervisor {
     platform: Arc<dyn Platform>,
     /// How long a failed capture or monitor waits before being opened again.
     retry: Duration,
+    /// Counts the system's device notifications, published for the panel.
+    devices_revision: u64,
     cfg: Option<EngineConfig>,
     session: Option<Session>,
 }
@@ -603,7 +611,12 @@ impl Supervisor {
                         self.apply(cfg);
                     }
                 }
-                Ok(Cmd::System(event)) => self.system(event),
+                Ok(Cmd::System(event)) => {
+                    // Counted even with nothing running, so the panel still
+                    // refreshes its list while every output is off.
+                    self.devices_revision += 1;
+                    self.system(event);
+                }
                 Ok(Cmd::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                     self.session = None;
                     return;
@@ -784,8 +797,12 @@ impl Supervisor {
 
     fn publish(&self) {
         let mut st = self.status.lock();
+        st.devices_revision = self.devices_revision;
         let (Some(cfg), Some(session)) = (&self.cfg, &self.session) else {
-            *st = Status::default();
+            *st = Status {
+                devices_revision: self.devices_revision,
+                ..Status::default()
+            };
             return;
         };
         st.running = true;
@@ -1144,6 +1161,30 @@ mod tests {
         });
         eventually("the source to play again", || {
             engine.status().source.state == NodeState::Playing
+        });
+    }
+
+    #[test]
+    fn a_device_notification_tells_the_panel_to_look_again() {
+        let fake = Arc::new(FakePlatform::default());
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+
+        // Counted with nothing running, so the list refreshes while every
+        // output is off.
+        let before = engine.status().devices_revision;
+        fake.fire(SystemEvent::DevicesChanged);
+        eventually("the revision to move", || {
+            engine.status().devices_revision > before
+        });
+
+        engine.apply(one_output("out"));
+        eventually("the output to play", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+        let running = engine.status().devices_revision;
+        fake.fire(SystemEvent::DefaultOutputChanged);
+        eventually("a default change to count too", || {
+            engine.status().devices_revision > running
         });
     }
 

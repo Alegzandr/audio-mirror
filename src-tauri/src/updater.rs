@@ -127,8 +127,11 @@ async fn watch(app: AppHandle, mut wait: Duration) {
     }
 }
 
+/// A timer, not a parked thread. The wait between checks is six hours, and
+/// `spawn_blocking` would hold a pool thread and its stack for all of it, in
+/// an app whose whole point is to sit in the tray unnoticed.
 async fn sleep(d: Duration) {
-    let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(d)).await;
+    tokio::time::sleep(d).await;
 }
 
 /// Installs a newer release if there is one and returns its version.
