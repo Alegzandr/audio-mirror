@@ -742,6 +742,23 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
     }
 }
 
+impl WasapiMonitor {
+    /// Records a drop once, on the way down.
+    ///
+    /// `audio_monitor_free_for_reconnect` reopens the device on the very
+    /// next packet, so the panel never has time to show it: a clock drift
+    /// between the captured device and the played one ends up as a glitch
+    /// nobody can account for afterwards. Logging every packet would fill
+    /// the file at packet rate, so only the transition is written.
+    fn fail(&self, reason: String) {
+        let mut state = self.state.lock();
+        if matches!(*state, MonitorState::Playing { .. }) {
+            log::warn!("monitor {}: {reason}, reopening", self.device_id);
+        }
+        *state = MonitorState::Reconnecting(reason);
+    }
+}
+
 impl AudioCallback for WasapiMonitor {
     /// `on_audio_playback`.
     fn on_audio(&self, audio: &ObsAudio) {
@@ -758,7 +775,7 @@ impl AudioCallback for WasapiMonitor {
                     *playback = Some(client);
                 }
                 Err(e) => {
-                    *self.state.lock() = MonitorState::Reconnecting(e);
+                    self.fail(e);
                     return;
                 }
             }
@@ -771,7 +788,7 @@ impl AudioCallback for WasapiMonitor {
         if !ok {
             // `audio_monitor_free_for_reconnect`.
             *playback = None;
-            *self.state.lock() = MonitorState::Reconnecting("Device unavailable".into());
+            self.fail("Device unavailable".into());
         }
     }
 }

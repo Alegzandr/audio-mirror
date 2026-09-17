@@ -202,10 +202,6 @@ impl Resampler {
         })
     }
 
-    pub fn output_spec(&self) -> AudioSpec {
-        self.output
-    }
-
     /// `audio_resampler_resample`. Returns the number of output frames;
     /// the samples are then read with [`Resampler::plane`].
     pub fn resample(&mut self, input: &[*const u8], in_frames: u32) -> Option<u32> {

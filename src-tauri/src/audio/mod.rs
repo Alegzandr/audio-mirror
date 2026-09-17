@@ -739,7 +739,7 @@ impl Supervisor {
         // for a full retry delay. Backends that reopen the device themselves
         // (WASAPI, on the next packet) clear the flag long before that, so
         // this only fires when nothing else would.
-        for slot in session.slots.values_mut() {
+        for (id, slot) in session.slots.iter_mut() {
             if let Slot::Active {
                 monitor,
                 state,
@@ -748,10 +748,21 @@ impl Supervisor {
             } = slot
             {
                 *state = monitor.state();
-                if matches!(state, MonitorState::Reconnecting(_)) {
-                    failing_since.get_or_insert(now);
-                } else {
-                    *failing_since = None;
+                match state {
+                    // Once on the way down and once on the way back, so a
+                    // mirror left running for days leaves a trace of every
+                    // time an output dropped without anyone watching.
+                    MonitorState::Reconnecting(why) => {
+                        if failing_since.is_none() {
+                            log::warn!("output {id}: {why}");
+                        }
+                        failing_since.get_or_insert(now);
+                    }
+                    MonitorState::Playing { .. } => {
+                        if failing_since.take().is_some() {
+                            log::info!("output {id}: playing again");
+                        }
+                    }
                 }
             }
         }
