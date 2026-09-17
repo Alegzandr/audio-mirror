@@ -99,6 +99,41 @@ const MONO_UPMIX: [[f64; MAX_AUDIO_CHANNELS]; MAX_AUDIO_CHANNELS] = [
     [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
 ];
 
+/// An output plane, kept aligned for `f32`.
+///
+/// OBS allocates these with `av_samples_alloc` and its monitors then cast
+/// straight to `float *` to apply the volume, with no alignment check
+/// (`coreaudio-output.c`, `wasapi-output.c`). Our monitors go through
+/// `align_to` instead, which silently leaves samples unscaled on a plane
+/// that is not aligned: a mute that does not mute. Backing the bytes with a
+/// `Vec<f32>` restores the guarantee OBS relies on.
+#[derive(Clone, Default)]
+struct Plane {
+    samples: Vec<f32>,
+    bytes: usize,
+}
+
+impl Plane {
+    fn resize(&mut self, bytes: usize) {
+        self.samples.resize(bytes.div_ceil(4), 0.0);
+        self.bytes = bytes;
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: `f32` has no padding; the length stays inside the buffer.
+        unsafe { std::slice::from_raw_parts(self.samples.as_ptr() as *const u8, self.bytes) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: as above, and the borrow is exclusive.
+        unsafe { std::slice::from_raw_parts_mut(self.samples.as_mut_ptr() as *mut u8, self.bytes) }
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.samples.as_mut_ptr() as *mut u8
+    }
+}
+
 /// `audio_resampler_t`.
 pub struct Resampler {
     ctx: *mut SwrContext,
@@ -107,7 +142,7 @@ pub struct Resampler {
     output_ch: usize,
     output: AudioSpec,
     /// One buffer per output plane.
-    buffers: Vec<Vec<u8>>,
+    buffers: Vec<Plane>,
     output_size: usize,
 }
 
@@ -162,13 +197,9 @@ impl Resampler {
             output_freq: dst.rate,
             output_ch,
             output: dst,
-            buffers: vec![Vec::new(); planes],
+            buffers: vec![Plane::default(); planes],
             output_size: 0,
         })
-    }
-
-    pub fn output_spec(&self) -> AudioSpec {
-        self.output
     }
 
     /// `audio_resampler_resample`. Returns the number of output frames;
@@ -192,7 +223,7 @@ impl Resampler {
                 self.output_ch * self.output.format.bytes_per_sample()
             };
             for buf in &mut self.buffers {
-                buf.resize(estimated * plane_bytes, 0);
+                buf.resize(estimated * plane_bytes);
             }
             self.output_size = estimated;
         }
@@ -225,11 +256,11 @@ impl Resampler {
 
     /// Output plane `i` after [`Resampler::resample`].
     pub fn plane(&self, i: usize) -> &[u8] {
-        &self.buffers[i]
+        self.buffers[i].as_slice()
     }
 
     pub fn plane_mut(&mut self, i: usize) -> &mut [u8] {
-        &mut self.buffers[i]
+        self.buffers[i].as_mut_slice()
     }
 }
 
@@ -303,6 +334,38 @@ mod tests {
         let wide = mono_to(Speakers::SevenPointOne);
         assert!(wide[3].abs() < 1e-6, "7.1 LFE stays silent: {wide:?}");
         assert!((wide[0] - 0.5).abs() < 1e-3 && (wide[7] - 0.5).abs() < 1e-3);
+    }
+
+    /// The monitors apply the volume through `align_to::<f32>()` on a plane.
+    /// A plane whose head is not empty would play samples at full volume, so
+    /// a mute would not mute: the alignment is part of the contract.
+    #[test]
+    fn planes_are_aligned_for_f32() {
+        for speakers in [Speakers::Stereo, Speakers::FivePointOne] {
+            for format in [SampleFormat::Float, SampleFormat::FloatPlanar] {
+                let src = spec(44_100, Speakers::Stereo, SampleFormat::Float);
+                let mut rs = Resampler::new(spec(OBS_SAMPLE_RATE, speakers, format), src).unwrap();
+                let input: Vec<u8> = std::iter::repeat_n(0.25f32, 2 * 441)
+                    .flat_map(f32::to_ne_bytes)
+                    .collect();
+                rs.resample(&[input.as_ptr()], 441).unwrap();
+                let planes = if format.is_planar() {
+                    speakers.channels()
+                } else {
+                    1
+                };
+                for i in 0..planes {
+                    let bytes = rs.plane(i);
+                    assert!(!bytes.is_empty(), "{speakers:?} {format:?} plane {i}");
+                    // SAFETY: `f32` has no invalid bit patterns.
+                    let (head, _, _) = unsafe { bytes.align_to::<f32>() };
+                    assert!(
+                        head.is_empty(),
+                        "{speakers:?} {format:?} plane {i} misaligned"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

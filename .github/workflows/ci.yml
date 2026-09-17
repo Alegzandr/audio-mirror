@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, develop]
   workflow_call:
+  # Lets a working branch be checked on all three systems before a pull
+  # request exists, which is the only way to compile the Windows and macOS
+  # backends when you are not on that system.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -45,8 +49,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Frontend syntax
+        run: for f in ui/*.js; do node --check "$f"; done
       - name: Frontend types
-        run: node --check ui/app.js
+        run: npm run check:ui
 
   test:
     name: Tests (${{ matrix.os }})

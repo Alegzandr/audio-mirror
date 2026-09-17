@@ -650,6 +650,10 @@ struct MonitorClient {
     render: Com<IAudioRenderClient>,
     resampler: Resampler,
     channels: usize,
+    /// Size of the device buffer, to tell a full one from a broken one.
+    buffer_frames: u32,
+    /// Packets skipped because the device had no room left.
+    skipped: u64,
     format: String,
 }
 
@@ -724,7 +728,7 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
         let resampler =
             Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
 
-        client
+        let buffer_frames = client
             .GetBufferSize()
             .map_err(|e| hr("Failed to get buffer size", e))?;
         let render: IAudioRenderClient = client
@@ -737,8 +741,27 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, String> {
             render: Com(render),
             resampler,
             channels,
+            buffer_frames,
+            skipped: 0,
             format: describe(to.rate, channels),
         })
+    }
+}
+
+impl WasapiMonitor {
+    /// Records a drop once, on the way down.
+    ///
+    /// `audio_monitor_free_for_reconnect` reopens the device on the very
+    /// next packet, so the panel never has time to show it: a clock drift
+    /// between the captured device and the played one ends up as a glitch
+    /// nobody can account for afterwards. Logging every packet would fill
+    /// the file at packet rate, so only the transition is written.
+    fn fail(&self, reason: String) {
+        let mut state = self.state.lock();
+        if matches!(*state, MonitorState::Playing { .. }) {
+            log::warn!("monitor {}: {reason}, reopening", self.device_id);
+        }
+        *state = MonitorState::Reconnecting(reason);
     }
 }
 
@@ -758,7 +781,7 @@ impl AudioCallback for WasapiMonitor {
                     *playback = Some(client);
                 }
                 Err(e) => {
-                    *self.state.lock() = MonitorState::Reconnecting(e);
+                    self.fail(e);
                     return;
                 }
             }
@@ -771,7 +794,7 @@ impl AudioCallback for WasapiMonitor {
         if !ok {
             // `audio_monitor_free_for_reconnect`.
             *playback = None;
-            *self.state.lock() = MonitorState::Reconnecting("Device unavailable".into());
+            self.fail("Device unavailable".into());
         }
     }
 }
@@ -799,7 +822,27 @@ fn write_packet(
     // SAFETY: COM calls on a started render client; the buffer returned by
     // GetBuffer holds `frames * channels` float samples.
     unsafe {
-        client.client.0.GetCurrentPadding()?;
+        // `wasapi-output.c` reads the padding, ignores it, and lets
+        // `GetBuffer` fail when the device has no room: that drops the client
+        // and reopens the device, which is an audible click. The room runs
+        // out on its own over a long session, because the captured device and
+        // the played one count on two different crystals and drift apart.
+        // Skipping one packet lets the device drain by the same amount, which
+        // is ten milliseconds nobody hears, and it costs nothing when the
+        // clocks agree. Anything else `GetBuffer` refuses is still a reason
+        // to reopen.
+        let pad = client.client.0.GetCurrentPadding()?;
+        if frames > client.buffer_frames.saturating_sub(pad) {
+            client.skipped += 1;
+            if client.skipped.is_power_of_two() {
+                log::warn!(
+                    "output buffer full, {} packet(s) skipped so far: \
+                     the played device runs slower than the captured one",
+                    client.skipped
+                );
+            }
+            return Ok(());
+        }
         let output = client.render.0.GetBuffer(frames)?;
 
         let samples = frames as usize * client.channels;

@@ -487,6 +487,29 @@ fn device_id_for_uid(uid: &str) -> Option<AudioObjectID> {
     }
 }
 
+/// `kAudioDevicePropertyDeviceIsAlive`. A device that was unplugged answers
+/// false, or stops answering at all.
+fn device_is_alive(id: AudioObjectID) -> bool {
+    let addr = address(
+        kAudioDevicePropertyDeviceIsAlive,
+        kAudioObjectPropertyScopeGlobal,
+    );
+    let mut alive = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: fixed size output.
+    let stat = unsafe {
+        AudioObjectGetPropertyData(
+            id,
+            &addr,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut alive as *mut _ as *mut c_void,
+        )
+    };
+    stat == noErr && alive != 0
+}
+
 /// `device_is_input` of `audio-device-enum.c`: loopback drivers are shown as
 /// output captures.
 fn device_is_input(name: &str) -> bool {
@@ -594,40 +617,48 @@ unsafe extern "C" fn devices_changed(
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        let addr = address(
-            kAudioHardwarePropertyDevices,
-            kAudioObjectPropertyScopeGlobal,
-        );
-        // SAFETY: removes the listener added in `watch_system`.
-        unsafe {
-            AudioObjectRemovePropertyListener(
-                kAudioObjectSystemObject,
-                &addr,
-                devices_changed,
-                &*self.callback as *const EventCallback as *mut c_void,
-            )
-        };
+        let data = &*self.callback as *const EventCallback as *mut c_void;
+        for selector in WATCHED {
+            let addr = address(selector, kAudioObjectPropertyScopeGlobal);
+            // SAFETY: removes the listeners added in `watch_system`.
+            unsafe {
+                AudioObjectRemovePropertyListener(
+                    kAudioObjectSystemObject,
+                    &addr,
+                    devices_changed,
+                    data,
+                )
+            };
+        }
     }
 }
+
+/// The default output is watched as a plain device change: unlike
+/// `win-wasapi`, the desktop capture here is ScreenCaptureKit and does not
+/// follow it, so there is nothing to rebuild. Only the list the panel shows
+/// has to catch up.
+const WATCHED: [u32; 2] = [
+    kAudioHardwarePropertyDevices,
+    kAudioHardwarePropertyDefaultOutputDevice,
+];
 
 pub fn watch_system(callback: EventCallback) -> Option<Box<dyn std::any::Any + Send + Sync>> {
     let watcher = Watcher {
         callback: Box::new(callback),
     };
-    let addr = address(
-        kAudioHardwarePropertyDevices,
-        kAudioObjectPropertyScopeGlobal,
-    );
-    // SAFETY: the client data lives as long as the returned watcher.
-    let stat = unsafe {
-        AudioObjectAddPropertyListener(
-            kAudioObjectSystemObject,
-            &addr,
-            devices_changed,
-            &*watcher.callback as *const EventCallback as *mut c_void,
-        )
-    };
-    (stat == noErr).then(|| Box::new(watcher) as Box<dyn std::any::Any + Send + Sync>)
+    let data = &*watcher.callback as *const EventCallback as *mut c_void;
+    let mut added = 0;
+    for selector in WATCHED {
+        let addr = address(selector, kAudioObjectPropertyScopeGlobal);
+        // SAFETY: the client data lives as long as the returned watcher.
+        let stat = unsafe {
+            AudioObjectAddPropertyListener(kAudioObjectSystemObject, &addr, devices_changed, data)
+        };
+        if stat == noErr {
+            added += 1;
+        }
+    }
+    (added > 0).then(|| Box::new(watcher) as Box<dyn std::any::Any + Send + Sync>)
 }
 
 // ---------------------------------------------------------------------------
@@ -866,23 +897,64 @@ unsafe impl Send for SendRetained {}
 // Input devices: AUHAL (`mac-audio.c`)
 // ---------------------------------------------------------------------------
 
+/// What the render callback owns while the unit runs.
+///
+/// `coreaudio_init` allocates these buffers and `coreaudio_uninit` frees
+/// them, with `AudioOutputUnitStop` in between, so the callback really is
+/// the only thread that touches them for as long as they exist. `mac-audio.c`
+/// keeps them in the one structure the reconnect thread also mutates and
+/// relies on that ordering alone; holding them apart is the same behaviour
+/// with the exclusive access made real instead of assumed.
+struct RenderState {
+    hub: Arc<SourceHub>,
+    unit: AudioUnit,
+    spec: AudioSpec,
+    buffers: Vec<Vec<u8>>,
+    /// Backing store for an `AudioBufferList`, 8-byte aligned.
+    buf_list: Vec<u64>,
+}
+
+impl RenderState {
+    fn buf_list(&mut self) -> *mut AudioBufferList {
+        self.buf_list.as_mut_ptr() as *mut AudioBufferList
+    }
+}
+
+/// What the device listener reads. Built once and never changed afterwards,
+/// so the listener thread and the reconnect thread only ever share it.
+struct DeviceWatch {
+    uid: String,
+    state: Arc<Mutex<CaptureState>>,
+}
+
 struct CoreAudioData {
     hub: Arc<SourceHub>,
-    uid: String,
+    /// Boxed so its address stays put for as long as the listener is
+    /// registered against it.
+    watch: Box<DeviceWatch>,
     unit: AudioUnit,
     device_id: AudioObjectID,
     au_initialized: bool,
     active: bool,
     spec: AudioSpec,
-    buffers: Vec<Vec<u8>>,
-    /// Backing store for an `AudioBufferList`, 8-byte aligned.
-    buf_list: Vec<u64>,
-    state: Mutex<CaptureState>,
+    /// Handed to the render callback for the lifetime of the unit, and read
+    /// back here only once `AudioOutputUnitStop` has returned.
+    render: *mut RenderState,
 }
 
-// SAFETY: the audio unit is driven from the reconnect thread and read by
-// the render callback, as `mac-audio.c` does.
+// SAFETY: the audio unit and the render state are driven from the reconnect
+// thread, which only touches them while the unit is stopped.
 unsafe impl Send for CoreAudioData {}
+
+impl CoreAudioData {
+    fn uid(&self) -> &str {
+        &self.watch.uid
+    }
+
+    fn set_state(&self, state: CaptureState) {
+        *self.watch.state.lock() = state;
+    }
+}
 
 fn ca_success(stat: OSStatus, what: &str) -> bool {
     if stat != noErr {
@@ -929,10 +1001,6 @@ fn convert_ca_format(flags: u32, bits: u32) -> Option<SampleFormat> {
 }
 
 impl CoreAudioData {
-    fn buf_list(&mut self) -> *mut AudioBufferList {
-        self.buf_list.as_mut_ptr() as *mut AudioBufferList
-    }
-
     /// `coreaudio_init_format` with downmix enabled.
     unsafe fn init_format(&mut self) -> bool {
         let mut input: AudioStreamBasicDescription = Default::default();
@@ -1056,15 +1124,21 @@ impl CoreAudioData {
 
         let bytes = frames as usize * std::mem::size_of::<f32>();
         let count = desc.channels_per_frame as usize;
-        self.buffers = (0..count).map(|_| vec![0u8; bytes]).collect();
         let bytes_needed = BUFFER_LIST_HEADER + std::mem::size_of::<AudioBuffer>() * count.max(1);
-        self.buf_list = vec![0u64; bytes_needed.div_ceil(8)];
-        let list = self.buf_list();
+        let mut render = Box::new(RenderState {
+            hub: self.hub.clone(),
+            unit: self.unit,
+            spec: self.spec,
+            buffers: (0..count).map(|_| vec![0u8; bytes]).collect(),
+            buf_list: vec![0u64; bytes_needed.div_ceil(8)],
+        });
+
+        let list = render.buf_list();
         // SAFETY: the byte buffer is sized for `count` AudioBuffer entries.
         unsafe {
             (*list).number_buffers = count as u32;
             let entries = (list as *mut u8).add(BUFFER_LIST_HEADER) as *mut AudioBuffer;
-            for (i, buf) in self.buffers.iter_mut().enumerate() {
+            for (i, buf) in render.buffers.iter_mut().enumerate() {
                 entries.add(i).write(AudioBuffer {
                     number_channels: 1,
                     data_byte_size: bytes as u32,
@@ -1072,6 +1146,8 @@ impl CoreAudioData {
                 });
             }
         }
+        // From here the callback owns it, until `uninit` takes it back.
+        self.render = Box::into_raw(render);
         true
     }
 }
@@ -1084,31 +1160,42 @@ unsafe extern "C" fn input_callback(
     frames: u32,
     _ignored: *mut AudioBufferList,
 ) -> OSStatus {
-    // SAFETY: ref_con is the capture's `CoreAudioData`.
+    // SAFETY: `ref_con` is the `RenderState` built for this unit. It exists
+    // from before `AudioOutputUnitStart` until after `AudioOutputUnitStop`
+    // has returned, and nothing else reads it in between, so this reference
+    // is the only one alive for the length of the call.
+    let render = unsafe { &mut *(ref_con as *mut RenderState) };
+    // SAFETY: the list is sized for the buffers, which outlive the render.
     unsafe {
-        let ca = &mut *(ref_con as *mut CoreAudioData);
-        let list = ca.buf_list();
-        for (i, buf) in ca.buffers.iter().enumerate() {
-            let entry = (list as *mut u8).add(BUFFER_LIST_HEADER) as *mut AudioBuffer;
-            (*entry.add(i)).data_byte_size = buf.len() as u32;
+        let list = render.buf_list();
+        let entries = (list as *mut u8).add(BUFFER_LIST_HEADER) as *mut AudioBuffer;
+        for (i, buf) in render.buffers.iter().enumerate() {
+            (*entries.add(i)).data_byte_size = buf.len() as u32;
         }
-        let stat = AudioUnitRender(ca.unit, action_flags, time_stamp, bus_number, frames, list);
+        let stat = AudioUnitRender(
+            render.unit,
+            action_flags,
+            time_stamp,
+            bus_number,
+            frames,
+            list,
+        );
         if !ca_success(stat, "audio retrieval") {
             return noErr;
         }
-
-        let bytes = frames as usize * ca.spec.format.bytes_per_sample();
-        let mut planes: [&[u8]; MAX_AUDIO_CHANNELS] = [&[]; MAX_AUDIO_CHANNELS];
-        let count = ca.buffers.len().min(MAX_AUDIO_CHANNELS);
-        for (plane, buf) in planes.iter_mut().zip(&ca.buffers).take(count) {
-            *plane = &buf[..bytes.min(buf.len())];
-        }
-        ca.hub.output_audio(&SourceAudio {
-            planes: &planes[..count],
-            frames,
-            spec: ca.spec,
-        });
     }
+
+    let bytes = frames as usize * render.spec.format.bytes_per_sample();
+    let mut planes: [&[u8]; MAX_AUDIO_CHANNELS] = [&[]; MAX_AUDIO_CHANNELS];
+    let count = render.buffers.len().min(MAX_AUDIO_CHANNELS);
+    for (plane, buf) in planes.iter_mut().zip(&render.buffers).take(count) {
+        *plane = &buf[..bytes.min(buf.len())];
+    }
+    render.hub.output_audio(&SourceAudio {
+        planes: &planes[..count],
+        frames,
+        spec: render.spec,
+    });
     noErr
 }
 
@@ -1118,10 +1205,11 @@ unsafe extern "C" fn device_notification(
     _addresses: *const AudioObjectPropertyAddress,
     client_data: *mut c_void,
 ) -> OSStatus {
-    // SAFETY: client_data is the capture's `CoreAudioData`.
-    let ca = unsafe { &*(client_data as *const CoreAudioData) };
-    log::info!("coreaudio: device '{}' disconnected or changed", ca.uid);
-    *ca.state.lock() = CaptureState::Retrying("Device disconnected".into());
+    // SAFETY: `client_data` is the capture's `DeviceWatch`, which is built
+    // once and never changed, so every holder only ever shares it.
+    let watch = unsafe { &*(client_data as *const DeviceWatch) };
+    log::info!("coreaudio: device '{}' disconnected or changed", watch.uid);
+    *watch.state.lock() = CaptureState::Retrying("Device disconnected".into());
     noErr
 }
 
@@ -1131,7 +1219,7 @@ impl CoreAudioData {
         if self.au_initialized {
             return true;
         }
-        let Some(id) = device_id_for_uid(&self.uid) else {
+        let Some(id) = device_id_for_uid(self.uid()) else {
             return false;
         };
         self.device_id = id;
@@ -1201,19 +1289,19 @@ impl CoreAudioData {
             }
         }
         self.active = true;
-        *self.state.lock() = CaptureState::Active {
+        self.set_state(CaptureState::Active {
             format: describe(self.spec.rate, self.spec.speakers.channels()),
-        };
+        });
         log::info!(
             "coreaudio: Device '{}' [{} Hz] initialized",
-            self.uid,
+            self.uid(),
             self.spec.rate
         );
         true
     }
 
     unsafe fn init_hooks(&mut self) -> bool {
-        let me = self as *mut CoreAudioData as *mut c_void;
+        let watch = &*self.watch as *const DeviceWatch as *mut c_void;
         unsafe {
             for selector in [
                 kAudioDevicePropertyDeviceIsAlive,
@@ -1221,7 +1309,12 @@ impl CoreAudioData {
             ] {
                 let addr = address(selector, kAudioObjectPropertyScopeGlobal);
                 if !ca_success(
-                    AudioObjectAddPropertyListener(self.device_id, &addr, device_notification, me),
+                    AudioObjectAddPropertyListener(
+                        self.device_id,
+                        &addr,
+                        device_notification,
+                        watch,
+                    ),
                     "set device callback",
                 ) {
                     return false;
@@ -1229,7 +1322,7 @@ impl CoreAudioData {
             }
             let callback = AURenderCallbackStruct {
                 input_proc: input_callback,
-                input_proc_ref_con: me,
+                input_proc_ref_con: self.render as *mut c_void,
             };
             ca_success(
                 AudioUnitSetProperty(
@@ -1246,14 +1339,19 @@ impl CoreAudioData {
     }
 
     unsafe fn remove_hooks(&mut self) {
-        let me = self as *mut CoreAudioData as *mut c_void;
+        let watch = &*self.watch as *const DeviceWatch as *mut c_void;
         unsafe {
             for selector in [
                 kAudioDevicePropertyDeviceIsAlive,
                 kAudioStreamPropertyAvailablePhysicalFormats,
             ] {
                 let addr = address(selector, kAudioObjectPropertyScopeGlobal);
-                AudioObjectRemovePropertyListener(self.device_id, &addr, device_notification, me);
+                AudioObjectRemovePropertyListener(
+                    self.device_id,
+                    &addr,
+                    device_notification,
+                    watch,
+                );
             }
         }
     }
@@ -1276,12 +1374,21 @@ impl CoreAudioData {
             }
         }
         self.au_initialized = false;
-        self.buffers.clear();
-        self.buf_list.clear();
+        // The unit is stopped and disposed, so the callback can no longer
+        // run: the buffers it owned are ours to free.
+        if !self.render.is_null() {
+            // SAFETY: the pointer came from `Box::into_raw` in `init_buffer`
+            // and is taken back exactly once.
+            drop(unsafe { Box::from_raw(self.render) });
+            self.render = ptr::null_mut();
+        }
     }
 }
 
 struct InputCapture {
+    /// Read straight through, so asking what the capture is doing never
+    /// waits for the reconnect thread to finish opening a device.
+    state: Arc<Mutex<CaptureState>>,
     data: Arc<Mutex<Box<CoreAudioData>>>,
     exit: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -1289,9 +1396,13 @@ struct InputCapture {
 
 /// Initial try, then the reconnect thread of `mac-audio.c` (2 s retries).
 fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, String> {
+    let state = Arc::new(Mutex::new(CaptureState::Starting));
     let data = Arc::new(Mutex::new(Box::new(CoreAudioData {
         hub,
-        uid: uid.to_string(),
+        watch: Box::new(DeviceWatch {
+            uid: uid.to_string(),
+            state: state.clone(),
+        }),
         unit: ptr::null_mut(),
         device_id: 0,
         au_initialized: false,
@@ -1301,29 +1412,27 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Strin
             speakers: OBS_SPEAKERS,
             format: SampleFormat::FloatPlanar,
         },
-        buffers: Vec::new(),
-        buf_list: Vec::new(),
-        state: Mutex::new(CaptureState::Starting),
+        render: ptr::null_mut(),
     })));
     let exit = Arc::new(AtomicBool::new(false));
 
     let thread = {
         let shared = data.clone();
         let exit = exit.clone();
+        let state = state.clone();
         std::thread::Builder::new()
             .name("coreaudio: reconnect".into())
             .spawn(move || loop {
                 {
                     let mut ca = shared.lock();
-                    let lost = matches!(*ca.state.lock(), CaptureState::Retrying(_));
+                    let lost = matches!(*state.lock(), CaptureState::Retrying(_));
                     // SAFETY: the unit is driven from this thread only.
                     unsafe {
                         if lost {
                             ca.uninit();
                         }
                         if !ca.au_initialized && !ca.init() {
-                            *ca.state.lock() =
-                                CaptureState::Retrying("Waiting for the device".into());
+                            ca.set_state(CaptureState::Retrying("Waiting for the device".into()));
                         }
                     }
                 }
@@ -1338,6 +1447,7 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Strin
     };
 
     Ok(Box::new(InputCapture {
+        state,
         data,
         exit,
         thread: Some(thread),
@@ -1346,7 +1456,7 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Strin
 
 impl Capture for InputCapture {
     fn state(&self) -> CaptureState {
-        self.data.lock().state.lock().clone()
+        self.state.lock().clone()
     }
 }
 
@@ -1387,6 +1497,9 @@ struct QueueState {
 }
 
 struct QueueMonitor {
+    /// UID of the output device, resolved again on every status read so an
+    /// unplugged device is noticed.
+    device: String,
     queue: AudioQueueRef,
     buffers: [AudioQueueBufferRef; 3],
     /// `monitor->mutex`.
@@ -1413,9 +1526,13 @@ impl QueueMonitor {
         };
         unsafe {
             let dst = std::slice::from_raw_parts_mut((*buf).audio_data as *mut u8, st.buffer_size);
-            for (d, s) in dst.iter_mut().zip(st.new_data.drain(..st.buffer_size)) {
-                *d = s;
-            }
+            // A ring buffer is at most two runs, so this is two memcpy
+            // rather than a branch per byte, inside the queue callback.
+            let (front, back) = st.new_data.as_slices();
+            let head = front.len().min(st.buffer_size);
+            dst[..head].copy_from_slice(&front[..head]);
+            dst[head..].copy_from_slice(&back[..st.buffer_size - head]);
+            st.new_data.drain(..st.buffer_size);
             (*buf).audio_data_byte_size = st.buffer_size as u32;
             let stat = AudioQueueEnqueueBuffer(self.queue, buf, 0, ptr::null());
             if !ca_success(stat, "AudioQueueEnqueueBuffer") {
@@ -1493,9 +1610,19 @@ impl AudioCallback for QueueMonitor {
 }
 
 impl Monitor for QueueMonitor {
+    /// An AudioQueue whose device went away keeps taking buffers and plays
+    /// none of them, so the device is what has to be looked at.
+    /// `coreaudio-output.c` never does, because OBS rebuilds a monitor only
+    /// from `obs_reset_audio_monitoring`; without this the output would stay
+    /// silent while the panel reported it as playing. The property is the
+    /// one `coreaudio_init_hooks` already watches for an input capture. See
+    /// the retry deviation on `MONITOR_RETRY`.
     fn state(&self) -> MonitorState {
-        MonitorState::Playing {
-            format: self.format.clone(),
+        match device_id_for_uid(&self.device) {
+            Some(id) if device_is_alive(id) => MonitorState::Playing {
+                format: self.format.clone(),
+            },
+            _ => MonitorState::Reconnecting("Device disconnected".into()),
         }
     }
 }
@@ -1558,6 +1685,7 @@ pub fn create_monitor(
         Resampler::new(to, from).ok_or_else(|| "Failed to create resampler".to_string())?;
 
     let mut monitor = Arc::new(QueueMonitor {
+        device: device.to_string(),
         queue: ptr::null_mut(),
         buffers: [ptr::null_mut(); 3],
         state: Mutex::new(QueueState {

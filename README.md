@@ -185,7 +185,13 @@ Wireless devices such as Bluetooth headphones add their own delay, and Audio Mir
 **Nothing works after installing a new driver or device.**
 Right click the tray icon and choose **Restart audio**.
 
-**Still stuck?** [Open an issue](https://github.com/Alegzandr/audio-mirror/issues) with your system, the source you picked and the message shown in the panel.
+**Still stuck?** [Open an issue](https://github.com/Alegzandr/audio-mirror/issues) with your system, the source you picked and the message shown in the panel. Audio Mirror also keeps a log file, which says what each device did:
+
+| System | Folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\io.github.alegzandr.audiomirror\logs` |
+| macOS | `~/Library/Logs/io.github.alegzandr.audiomirror` |
+| Linux | `~/.local/share/io.github.alegzandr.audiomirror/logs` |
 
 ## Settings and uninstalling
 
@@ -201,7 +207,7 @@ To uninstall, turn off **Start with system** in the panel, quit the app, then de
 
 ## How it works
 
-The audio engine is a port of OBS Studio's desktop audio capture and audio monitoring, with three differences: a source feeds N monitors instead of one, each output has its own mute, and a monitor whose device cannot be opened is retried every 3 seconds. Everything else follows the OBS code path by path.
+The audio engine is a port of OBS Studio's desktop audio capture and audio monitoring, with three differences: a source feeds N monitors instead of one, each output has its own mute, and an output that cannot be opened, or that goes away while it plays, is retried every 3 seconds. OBS reopens a monitor only when you change its monitoring device; an app that sits in the tray unattended has to notice by itself. Everything else follows the OBS code path by path.
 
 | | Windows | macOS | Linux |
 | --- | --- | --- | --- |
