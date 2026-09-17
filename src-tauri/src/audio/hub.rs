@@ -4,7 +4,6 @@
 //! registered capture callback on the capture thread
 //! (`source_signal_audio_data`). Monitors are those callbacks.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -14,6 +13,7 @@ use super::format::{
     OBS_SAMPLE_RATE, OBS_SPEAKERS,
 };
 use super::swr::Resampler;
+use super::volume::AtomicF32;
 
 /// `obs_source_audio_capture_t`.
 pub trait AudioCallback: Send + Sync {
@@ -41,18 +41,14 @@ pub struct SourceHub {
     /// Guarded like `audio_cb_mutex`.
     callbacks: Mutex<Callbacks>,
     next_id: Mutex<CallbackId>,
-    /// Peak of the converted audio since the last read, for the UI.
-    peak: AtomicU32,
-}
-
-impl Default for SourceHub {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Peak of the converted audio since the last read. Owned by the engine
+    /// and read in `Engine::status` like each output's, so every meter
+    /// covers the same window: the time since the panel last asked.
+    peak: Arc<AtomicF32>,
 }
 
 impl SourceHub {
-    pub fn new() -> Self {
+    pub fn new(peak: Arc<AtomicF32>) -> Self {
         Self {
             process: Mutex::new(ProcessState {
                 sample_info: None,
@@ -62,7 +58,7 @@ impl SourceHub {
             }),
             callbacks: Mutex::new(Callbacks::default()),
             next_id: Mutex::new(1),
-            peak: AtomicU32::new(0f32.to_bits()),
+            peak,
         }
     }
 
@@ -83,10 +79,6 @@ impl SourceHub {
         Arc::make_mut(&mut self.callbacks.lock()).retain(|(i, _)| *i != id);
     }
 
-    pub fn take_peak(&self) -> f32 {
-        f32::from_bits(self.peak.swap(0f32.to_bits(), Ordering::Relaxed))
-    }
-
     /// `obs_source_output_audio`. Called on the capture thread.
     pub fn output_audio(&self, audio: &SourceAudio) {
         let mut st = self.process.lock();
@@ -99,11 +91,7 @@ impl SourceHub {
             .iter()
             .flat_map(|p| p.iter())
             .fold(0f32, |m, s| m.max(s.abs()));
-        let _ = self
-            .peak
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                (peak > f32::from_bits(cur)).then_some(peak.to_bits())
-            });
+        self.peak.raise(peak);
 
         let data = ObsAudio {
             planes,
@@ -215,7 +203,8 @@ mod tests {
 
     #[test]
     fn converts_then_signals_callbacks() {
-        let hub = SourceHub::new();
+        let peak = Arc::new(AtomicF32::new(0.0));
+        let hub = SourceHub::new(peak.clone());
         let probe = Arc::new(Probe(Mutex::new(Vec::new())));
         let id = hub.add_callback(probe.clone());
 
@@ -237,7 +226,7 @@ mod tests {
             (calls[0].1 - 0.5).abs() < 1e-3,
             "mono reaches the right channel"
         );
-        assert!(hub.take_peak() > 0.49);
+        assert!(peak.take() > 0.49);
 
         hub.remove_callback(id);
         hub.output_audio(&SourceAudio {
@@ -250,7 +239,7 @@ mod tests {
 
     #[test]
     fn obs_format_passes_through() {
-        let hub = SourceHub::new();
+        let hub = SourceHub::new(Arc::default());
         let probe = Arc::new(Probe(Mutex::new(Vec::new())));
         hub.add_callback(probe.clone());
         let l = interleaved(100, 1, 0.1);

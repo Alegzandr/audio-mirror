@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { view } from "./harness.js";
@@ -29,8 +30,13 @@ const status = (over) => ({
 test("the fader curve matches the one the engine applies", () => {
   assert.equal(en.faderToDb(1), 0);
   assert.equal(en.faderToDb(0), -Infinity);
-  // The value the Rust test checks against OBS's own formula.
-  assert.ok(Math.abs(en.faderToDb(0.5) - -18.739) < 0.01);
+  // The points the Rust test checks `volume::fader_to_db` against.
+  const { points } = JSON.parse(readFileSync(new URL("../fader-curve.json", import.meta.url), "utf8"));
+  for (const [def, want] of points) {
+    const db = en.faderToDb(def);
+    if (want === null) assert.equal(db, -Infinity, `fader ${def}`);
+    else assert.ok(Math.abs(db - want) < 0.01, `fader ${def}: ${db} dB, expected ${want}`);
+  }
   let previous = -Infinity;
   for (let i = 1; i <= 100; i++) {
     const db = en.faderToDb(i / 100);

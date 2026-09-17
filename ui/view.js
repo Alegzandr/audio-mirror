@@ -17,19 +17,25 @@
 
   const i18n = () => window.I18n;
 
+  /** Bounds of the OBS fader, `LOG_OFFSET_DB` and `LOG_RANGE_DB` in `volume.rs`. */
+  const LOG_OFFSET_DB = 6;
+  const LOG_RANGE_DB = 96;
+
   /**
-   * OBS logarithmic fader curve, same as `volume::fader_to_db`.
+   * OBS logarithmic fader curve, same as `volume::fader_to_db`. Both are
+   * checked against `tests/fader-curve.json`.
    * @param {number} def Fader position, 0 to 1.
    */
   function faderToDb(def) {
     if (def >= 1) return 0;
     if (def <= 0) return -Infinity;
-    return -102 * Math.pow(17, -def) + 6;
+    const span = LOG_RANGE_DB + LOG_OFFSET_DB;
+    return -span * Math.pow(span / LOG_OFFSET_DB, -def) + LOG_OFFSET_DB;
   }
 
   /** @param {number} db */
   function formatDb(db) {
-    if (!Number.isFinite(db) || db <= -96) return `${MINUS}∞ dB`;
+    if (!Number.isFinite(db) || db <= -LOG_RANGE_DB) return `${MINUS}∞ dB`;
     const abs = i18n().formatNumber(Math.abs(db));
     return db < -0.05 ? `${MINUS}${abs} dB` : `${abs} dB`;
   }

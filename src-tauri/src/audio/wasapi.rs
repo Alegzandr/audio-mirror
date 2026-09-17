@@ -675,7 +675,6 @@ impl Drop for MonitorClient {
 }
 
 pub struct WasapiMonitor {
-    device_id: String,
     shared: Arc<OutputShared>,
     /// `playback_mutex`, taken with `TryAcquireSRWLockExclusive`.
     playback: Mutex<Option<MonitorClient>>,
@@ -694,7 +693,6 @@ pub fn create_monitor(
     let client = init_monitor_client(device)?;
     let format = client.format.clone();
     Ok(MonitorInit::Active(Arc::new(WasapiMonitor {
-        device_id: device.to_string(),
         shared,
         playback: Mutex::new(Some(client)),
         state: Mutex::new(MonitorState::Playing { format }),
@@ -770,53 +768,25 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, Message> {
     }
 }
 
-impl WasapiMonitor {
-    /// Records a drop once, on the way down.
-    ///
-    /// `audio_monitor_free_for_reconnect` reopens the device on the very
-    /// next packet, so the panel never has time to show it: a clock drift
-    /// between the captured device and the played one ends up as a glitch
-    /// nobody can account for afterwards. Logging every packet would fill
-    /// the file at packet rate, so only the transition is written.
-    fn fail(&self, reason: Message) {
-        let mut state = self.state.lock();
-        if matches!(*state, MonitorState::Playing { .. }) {
-            log::warn!("monitor {}: {reason}, reopening", self.device_id);
-        }
-        *state = MonitorState::Reconnecting(reason);
-    }
-}
-
 impl AudioCallback for WasapiMonitor {
     /// `on_audio_playback`.
     fn on_audio(&self, audio: &ObsAudio) {
         let Some(mut playback) = self.playback.try_lock() else {
             return;
         };
-
-        if playback.is_none() {
-            match init_monitor_client(&self.device_id) {
-                Ok(client) => {
-                    *self.state.lock() = MonitorState::Playing {
-                        format: client.format.clone(),
-                    };
-                    *playback = Some(client);
-                }
-                Err(e) => {
-                    self.fail(e);
-                    return;
-                }
-            }
-        }
-
+        // `on_audio_playback` reopens the device here, on the next packet.
+        // That is an enumerator pass, `Activate`, `Initialize` and `Start` on
+        // the capture thread, for every packet while the device is gone, and
+        // the capture and every other output wait for it. The session
+        // rebuilds the monitor from its own thread instead (`released`).
+        let Some(client) = playback.as_mut() else {
+            return;
+        };
         let vol = self.shared.volume();
-        let ok = playback
-            .as_mut()
-            .is_some_and(|client| write_packet(client, audio, &self.shared, vol).is_ok());
-        if !ok {
+        if write_packet(client, audio, &self.shared, vol).is_err() {
             // `audio_monitor_free_for_reconnect`.
             *playback = None;
-            self.fail(msg::DEVICE_UNAVAILABLE.into());
+            *self.state.lock() = MonitorState::Reconnecting(msg::DEVICE_UNAVAILABLE.into());
         }
     }
 }
@@ -824,6 +794,11 @@ impl AudioCallback for WasapiMonitor {
 impl Monitor for WasapiMonitor {
     fn state(&self) -> MonitorState {
         self.state.lock().clone()
+    }
+
+    fn released(&self) -> bool {
+        // Only ever set by `on_audio`, which never puts a client back.
+        matches!(*self.state.lock(), MonitorState::Reconnecting(_))
     }
 }
 
@@ -1109,7 +1084,7 @@ mod tests {
             frames: Mutex::new(0),
             shared: OutputShared::new(0.0, true),
         });
-        let hub = Arc::new(SourceHub::new());
+        let hub = Arc::new(SourceHub::new(Arc::default()));
         hub.add_callback(probes.clone());
         let capture = start_capture(DESKTOP, hub.clone()).unwrap();
         std::thread::sleep(Duration::from_secs(seconds));

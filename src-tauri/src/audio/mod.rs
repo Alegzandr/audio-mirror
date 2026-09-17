@@ -43,7 +43,7 @@ use serde::Serialize;
 
 use hub::{AudioCallback, CallbackId, SourceHub};
 use message::{self as msg, Message};
-use volume::OutputShared;
+use volume::{AtomicF32, OutputShared};
 
 /// Id of the system default output, captured like OBS's "Desktop Audio".
 pub const DESKTOP: &str = "desktop";
@@ -205,6 +205,15 @@ pub enum MonitorState {
 /// A monitor is a capture callback of the source, like in libobs.
 pub trait Monitor: AudioCallback {
     fn state(&self) -> MonitorState;
+
+    /// The monitor has let go of its device and will not open it again: the
+    /// session builds a new one on its next tick instead of waiting out the
+    /// retry delay. OBS reopens the device from the audio callback
+    /// (`audio_monitor_free_for_reconnect`); with N outputs that would stall
+    /// the capture and every other output while one device is slow to open.
+    fn released(&self) -> bool {
+        false
+    }
 }
 
 pub enum MonitorInit {
@@ -301,6 +310,9 @@ pub struct Engine {
     thread: Option<JoinHandle<()>>,
     status: Arc<Mutex<Status>>,
     shared: SharedMap,
+    /// Peak of the source, written by whichever capture is running and read
+    /// in [`Engine::status`] next to the outputs' peaks.
+    source_peak: Arc<AtomicF32>,
     _watcher: Watcher,
 }
 
@@ -324,11 +336,13 @@ impl Engine {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(Status::default()));
         let shared = SharedMap::default();
+        let source_peak = Arc::new(AtomicF32::new(0.0));
 
         let sup = Supervisor {
             rx,
             status: status.clone(),
             shared: shared.clone(),
+            source_peak: source_peak.clone(),
             platform: platform.clone(),
             retry,
             devices_revision: 0,
@@ -350,6 +364,7 @@ impl Engine {
             thread: Some(thread),
             status,
             shared,
+            source_peak,
             _watcher: watcher,
         }
     }
@@ -394,8 +409,15 @@ impl Engine {
     }
 
     /// Status snapshot, with the peaks accumulated since the previous call.
+    /// The source and the outputs are read the same way, so their meters
+    /// cover the same window.
     pub fn status(&self) -> Status {
         let mut st = self.status.lock().clone();
+        // Taken even when stopped, so a stale peak is not shown on restart.
+        let source_peak = self.source_peak.take();
+        if st.running {
+            st.source.peak = source_peak;
+        }
         let shared = self.shared.lock();
         for o in &mut st.outputs {
             if let Some(s) = shared.get(&o.id) {
@@ -455,8 +477,13 @@ struct Session {
 }
 
 impl Session {
-    fn start(platform: Arc<dyn Platform>, retry: Duration, source: &str) -> Session {
-        let hub = Arc::new(SourceHub::new());
+    fn start(
+        platform: Arc<dyn Platform>,
+        retry: Duration,
+        source: &str,
+        peak: Arc<AtomicF32>,
+    ) -> Session {
+        let hub = Arc::new(SourceHub::new(peak));
         let capture = platform.start_capture(source, hub.clone());
         if let Err(e) = &capture {
             log::warn!("capture: {e}");
@@ -561,6 +588,7 @@ struct Supervisor {
     rx: Receiver<Cmd>,
     status: Arc<Mutex<Status>>,
     shared: SharedMap,
+    source_peak: Arc<AtomicF32>,
     platform: Arc<dyn Platform>,
     /// How long a failed capture or monitor waits before being opened again.
     retry: Duration,
@@ -660,6 +688,7 @@ impl Supervisor {
                 self.platform.clone(),
                 self.retry,
                 &cfg.source,
+                self.source_peak.clone(),
             ));
         }
 
@@ -759,9 +788,10 @@ impl Supervisor {
         }
 
         // A monitor reporting a failed device is rebuilt once it has said so
-        // for a full retry delay. Backends that reopen the device themselves
-        // (WASAPI, on the next packet) clear the flag long before that, so
-        // this only fires when nothing else would.
+        // for a full retry delay, or at once if it has released the device
+        // (WASAPI). Should that rebuild fail, the slot turns `Failed` and is
+        // retried on the usual delay.
+        let retry = self.retry;
         for (id, slot) in session.slots.iter_mut() {
             if let Slot::Active {
                 monitor,
@@ -778,6 +808,9 @@ impl Supervisor {
                     MonitorState::Reconnecting(why) => {
                         if failing_since.is_none() {
                             log::warn!("output {id}: {why}");
+                            if monitor.released() {
+                                *failing_since = now.checked_sub(retry);
+                            }
                         }
                         failing_since.get_or_insert(now);
                     }
@@ -830,7 +863,8 @@ impl Supervisor {
             state,
             message,
             format,
-            peak: session.hub.take_peak(),
+            // Filled in by `Engine::status`, like the outputs'.
+            peak: 0.0,
         };
 
         st.outputs = cfg
@@ -899,17 +933,29 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A monitor whose reported state the test drives.
-    struct FakeMonitor(Mutex<MonitorState>);
+    struct FakeMonitor {
+        state: Mutex<MonitorState>,
+        released: std::sync::atomic::AtomicBool,
+    }
 
     impl FakeMonitor {
         fn playing() -> Arc<FakeMonitor> {
-            Arc::new(FakeMonitor(Mutex::new(MonitorState::Playing {
-                format: "48 kHz, stereo".into(),
-            })))
+            Arc::new(FakeMonitor {
+                state: Mutex::new(MonitorState::Playing {
+                    format: "48 kHz, stereo".into(),
+                }),
+                released: Default::default(),
+            })
         }
 
         fn lose_device(&self) {
-            *self.0.lock() = MonitorState::Reconnecting(msg::DEVICE_DISCONNECTED.into());
+            *self.state.lock() = MonitorState::Reconnecting(msg::DEVICE_DISCONNECTED.into());
+        }
+
+        /// Loses the device and lets go of it, as the WASAPI monitor does.
+        fn release_device(&self) {
+            self.released.store(true, Ordering::Relaxed);
+            self.lose_device();
         }
     }
 
@@ -919,7 +965,11 @@ mod tests {
 
     impl Monitor for FakeMonitor {
         fn state(&self) -> MonitorState {
-            self.0.lock().clone()
+            self.state.lock().clone()
+        }
+
+        fn released(&self) -> bool {
+            self.released.load(Ordering::Relaxed)
         }
     }
 
@@ -963,6 +1013,8 @@ mod tests {
         built: Mutex<Vec<String>>,
         live: Mutex<HashMap<String, Arc<FakeMonitor>>>,
         capture: Mutex<Option<Arc<FakeCapture>>>,
+        /// The hub of the last capture, to feed it audio.
+        hub: Mutex<Option<Arc<SourceHub>>>,
         captures_started: AtomicUsize,
         /// Monitors left to blow up on, to stand in for a bug in a backend.
         panics_left: AtomicUsize,
@@ -1009,9 +1061,10 @@ mod tests {
         fn start_capture(
             &self,
             _source: &str,
-            _hub: Arc<SourceHub>,
+            hub: Arc<SourceHub>,
         ) -> Result<Box<dyn Capture>, Message> {
             self.captures_started.fetch_add(1, Ordering::Relaxed);
+            *self.hub.lock() = Some(hub);
             let capture = Arc::new(FakeCapture {
                 state: Mutex::new(CaptureState::Active {
                     format: "48 kHz, stereo".into(),
@@ -1244,6 +1297,66 @@ mod tests {
         eventually("the output to play again", || {
             output_state(&engine, "out") == Some(NodeState::Playing)
         });
+    }
+
+    #[test]
+    fn a_monitor_that_released_its_device_is_rebuilt_at_once() {
+        const SLOW: Duration = Duration::from_secs(30);
+
+        let fake = Arc::new(FakePlatform::default());
+        let engine = Engine::with_retry(fake.clone(), SLOW);
+        engine.apply(one_output("out"));
+        eventually("the output to play", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+
+        // The device is reopened by the supervisor, not by the audio
+        // callback, and without waiting out the retry delay.
+        fake.monitor("out").release_device();
+        eventually("the monitor to be rebuilt", || fake.built("out") >= 2);
+        eventually("the output to play again", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+
+        // A device that still refuses is retried on the usual delay.
+        fake.refuse("out", msg::DEVICE_UNAVAILABLE);
+        fake.monitor("out").release_device();
+        eventually("the rebuild to fail", || fake.built("out") >= 3);
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(fake.built("out"), 3, "no retry before the delay");
+        assert_eq!(output_state(&engine, "out"), Some(NodeState::Error));
+    }
+
+    #[test]
+    fn the_source_meter_is_read_like_the_outputs() {
+        let fake = Arc::new(FakePlatform::default());
+        let engine = Engine::with_retry(fake.clone(), TEST_RETRY);
+        engine.apply(one_output("out"));
+        eventually("the output to play", || {
+            output_state(&engine, "out") == Some(NodeState::Playing)
+        });
+
+        let hub = fake.hub.lock().clone().unwrap();
+        let tone = vec![0.5f32; 480];
+        hub.output_audio(&format::SourceAudio {
+            planes: &[as_bytes(&tone), as_bytes(&tone)],
+            frames: 480,
+            spec: format::AudioSpec {
+                rate: format::OBS_SAMPLE_RATE,
+                speakers: format::OBS_SPEAKERS,
+                format: format::OBS_FORMAT,
+            },
+        });
+        // Several supervisor ticks later, the peak is still there: only the
+        // panel's read consumes it.
+        std::thread::sleep(TICK * 3);
+        assert_eq!(engine.status().source.peak, 0.5);
+        assert_eq!(engine.status().source.peak, 0.0);
+    }
+
+    fn as_bytes(samples: &[f32]) -> &[u8] {
+        // SAFETY: plain float data, read back as bytes.
+        unsafe { std::slice::from_raw_parts(samples.as_ptr().cast(), size_of_val(samples)) }
     }
 
     #[test]

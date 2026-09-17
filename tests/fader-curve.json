@@ -1,0 +1,14 @@
+{
+  "comment": "OBS_FADER_LOG reference points, fader position to dB, checked by volume::tests (Rust) and tests/ui/view.test.js so the two copies of the curve cannot drift apart.",
+  "points": [
+    [0, null],
+    [0.05, -82.527],
+    [0.1, -70.834],
+    [0.25, -44.233],
+    [0.5, -18.739],
+    [0.75, -6.183],
+    [0.9, -1.965],
+    [0.99, -0.172],
+    [1, 0]
+  ]
+}
