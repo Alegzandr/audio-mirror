@@ -44,9 +44,13 @@ use volume::OutputShared;
 pub const DESKTOP: &str = "desktop";
 pub const DESKTOP_NAME: &str = "Default output";
 
-/// Retry delay for a monitor whose device could not be opened. OBS only
-/// retries on a settings change; a background service retries on its own,
-/// at the same pace as `win-wasapi` reconnects.
+/// Retry delay for a monitor whose device could not be opened, or that went
+/// away while playing. OBS has no equivalent: `obs_reset_audio_monitoring`
+/// (`libobs/obs.c`) rebuilds monitors only when the user picks another
+/// monitoring device, or, on Windows, when the default render device
+/// changes, and nothing ever reads a monitor's device back. A tray app
+/// nobody is watching retries on its own, at the pace `win-wasapi`
+/// reconnects a capture.
 const MONITOR_RETRY: Duration = Duration::from_secs(3);
 const TICK: Duration = Duration::from_millis(250);
 

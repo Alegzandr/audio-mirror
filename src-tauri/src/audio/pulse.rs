@@ -1093,9 +1093,11 @@ impl AudioCallback for PulseMonitor {
 
 impl Monitor for PulseMonitor {
     /// PulseAudio moves a stream whose sink went away to FAILED or
-    /// TERMINATED and never plays it again. OBS only builds monitors from
-    /// the UI and so never looks; a background mirror has to, otherwise the
-    /// output stays silent while the panel reports it as playing.
+    /// TERMINATED and never plays it again. `pulseaudio-output.c` never
+    /// reads the stream state back, because OBS rebuilds a monitor only
+    /// from `obs_reset_audio_monitoring`; without this the output would
+    /// stay silent while the panel reported it as playing. See the retry
+    /// deviation on `MONITOR_RETRY`.
     fn state(&self) -> MonitorState {
         let pulse = monitor_loop();
         let _g = pulse.lock();

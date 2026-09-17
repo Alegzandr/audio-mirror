@@ -101,10 +101,12 @@ const MONO_UPMIX: [[f64; MAX_AUDIO_CHANNELS]; MAX_AUDIO_CHANNELS] = [
 
 /// An output plane, kept aligned for `f32`.
 ///
-/// The monitors reinterpret a plane as `f32` samples to apply the volume
-/// (`align_to`), and a plane that was not aligned would leave samples
-/// unscaled: a mute that does not mute. Backing the bytes with a `Vec<f32>`
-/// makes the alignment hold by construction rather than by luck.
+/// OBS allocates these with `av_samples_alloc` and its monitors then cast
+/// straight to `float *` to apply the volume, with no alignment check
+/// (`coreaudio-output.c`, `wasapi-output.c`). Our monitors go through
+/// `align_to` instead, which silently leaves samples unscaled on a plane
+/// that is not aligned: a mute that does not mute. Backing the bytes with a
+/// `Vec<f32>` restores the guarantee OBS relies on.
 #[derive(Clone, Default)]
 struct Plane {
     samples: Vec<f32>,

@@ -1520,10 +1520,12 @@ impl AudioCallback for QueueMonitor {
 
 impl Monitor for QueueMonitor {
     /// An AudioQueue whose device went away keeps taking buffers and plays
-    /// none of them, so the device is what has to be looked at. OBS only
-    /// builds monitors from the UI and so never looks; a background mirror
-    /// has to, otherwise the output stays silent while the panel reports it
-    /// as playing.
+    /// none of them, so the device is what has to be looked at.
+    /// `coreaudio-output.c` never does, because OBS rebuilds a monitor only
+    /// from `obs_reset_audio_monitoring`; without this the output would stay
+    /// silent while the panel reported it as playing. The property is the
+    /// one `coreaudio_init_hooks` already watches for an input capture. See
+    /// the retry deviation on `MONITOR_RETRY`.
     fn state(&self) -> MonitorState {
         match device_id_for_uid(&self.device) {
             Some(id) if device_is_alive(id) => MonitorState::Playing {
