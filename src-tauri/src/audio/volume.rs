@@ -47,11 +47,20 @@ impl AtomicF32 {
     }
     /// Keeps the maximum of the current value and `v`.
     pub fn raise(&self, v: f32) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                (v > f32::from_bits(cur)).then_some(v.to_bits())
-            });
+        // `fetch_update` is deprecated in favor of `try_update`, which is
+        // newer than `rust-version`: same loop, spelled out.
+        let mut cur = self.0.load(Ordering::Relaxed);
+        while v > f32::from_bits(cur) {
+            match self.0.compare_exchange_weak(
+                cur,
+                v.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
     }
     /// Reads the value and resets it to zero.
     pub fn take(&self) -> f32 {
