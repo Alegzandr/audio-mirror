@@ -159,7 +159,57 @@ fn open_at(app: &AppHandle, panel: &WebviewWindow, anchor: Option<Rect>) {
         if same_show && panel.is_visible().unwrap_or(false) && !panel.is_focused().unwrap_or(true) {
             let _ = panel.set_focus();
         }
+        #[cfg(windows)]
+        hide_on_outside_click(&panel, shown);
     });
+}
+
+/// Windows refuses focus to a window shown while the user is clicking in
+/// another one, and the refocus above can be refused for the same reason. A
+/// panel without focus gets no blur, so while it stays unfocused a click
+/// outside it hides it here instead.
+#[cfg(windows)]
+fn hide_on_outside_click(panel: &WebviewWindow, shown: u64) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+
+    let pressed = || unsafe {
+        [VK_LBUTTON, VK_RBUTTON]
+            .iter()
+            .any(|k| GetAsyncKeyState(i32::from(k.0)) as u16 & 0x8000 != 0)
+    };
+    // A button held when the watch starts is not a new click.
+    let mut was_pressed = true;
+    loop {
+        if SHOWN_AT.load(Ordering::Relaxed) != shown
+            || !panel.is_visible().unwrap_or(false)
+            || panel.is_focused().unwrap_or(true)
+        {
+            return;
+        }
+        let down = pressed();
+        if down && !was_pressed && !cursor_over(panel) {
+            hide(panel);
+            return;
+        }
+        was_pressed = down;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(windows)]
+fn cursor_over(panel: &WebviewWindow) -> bool {
+    let (Ok(cursor), Ok(pos), Ok(size)) = (
+        panel.cursor_position(),
+        panel.outer_position(),
+        panel.outer_size(),
+    ) else {
+        return true;
+    };
+    let (x, y) = (cursor.x, cursor.y);
+    x >= pos.x as f64
+        && y >= pos.y as f64
+        && x < pos.x as f64 + size.width as f64
+        && y < pos.y as f64 + size.height as f64
 }
 
 /// Anchor point (center of the tray icon, else the cursor) in physical pixels.
