@@ -1,6 +1,6 @@
 [package]
 name = "audio-mirror"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 rust-version = "1.85"
 description = "Mirrors one audio source to several outputs"
@@ -43,6 +43,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.62"
 winreg = "0.55"

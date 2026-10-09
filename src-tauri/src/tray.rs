@@ -155,8 +155,8 @@ fn open_at(app: &AppHandle, panel: &WebviewWindow, anchor: Option<Rect>) {
     let panel = panel.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(BLUR_GRACE_MS + 50));
-        let same_show = SHOWN_AT.load(Ordering::Relaxed) == shown;
-        if same_show && panel.is_visible().unwrap_or(false) && !panel.is_focused().unwrap_or(true) {
+        // A no-op when the panel already is the foreground window.
+        if SHOWN_AT.load(Ordering::Relaxed) == shown && panel.is_visible().unwrap_or(false) {
             let _ = panel.set_focus();
         }
         #[cfg(windows)]
@@ -166,12 +166,19 @@ fn open_at(app: &AppHandle, panel: &WebviewWindow, anchor: Option<Rect>) {
 
 /// Windows refuses focus to a window shown while the user is clicking in
 /// another one, and the refocus above can be refused for the same reason. A
-/// panel without focus gets no blur, so while it stays unfocused a click
-/// outside it hides it here instead.
+/// panel without focus gets no blur, so while it is not the foreground window
+/// a click outside it hides it here instead. The foreground window is asked
+/// from Windows: the focus state the window keeps can claim focus the panel
+/// does not have, which kept this watch from ever running.
 #[cfg(windows)]
 fn hide_on_outside_click(panel: &WebviewWindow, shown: u64) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
+    let Ok(hwnd) = panel.hwnd() else {
+        return;
+    };
+    let hwnd = hwnd.0 as isize;
     let pressed = || unsafe {
         [VK_LBUTTON, VK_RBUTTON]
             .iter()
@@ -180,16 +187,18 @@ fn hide_on_outside_click(panel: &WebviewWindow, shown: u64) {
     // A button held when the watch starts is not a new click.
     let mut was_pressed = true;
     loop {
-        if SHOWN_AT.load(Ordering::Relaxed) != shown
-            || !panel.is_visible().unwrap_or(false)
-            || panel.is_focused().unwrap_or(true)
-        {
+        if SHOWN_AT.load(Ordering::Relaxed) != shown || !panel.is_visible().unwrap_or(false) {
             return;
         }
         let down = pressed();
         if down && !was_pressed && !cursor_over(panel) {
-            hide(panel);
-            return;
+            // In the foreground, the blur that follows this click hides it.
+            let foreground = unsafe { GetForegroundWindow() }.0 as isize;
+            if foreground != hwnd {
+                log::info!("panel: hidden on a click outside it without focus");
+                hide(panel);
+                return;
+            }
         }
         was_pressed = down;
         std::thread::sleep(Duration::from_millis(20));
