@@ -5,7 +5,7 @@
 //! menu. Linux trays do not report clicks, so the menu also offers "Open".
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -21,8 +21,10 @@ const REOPEN_GUARD_MS: u64 = 250;
 
 static HIDDEN_AT: AtomicU64 = AtomicU64::new(0);
 /// Windows may hand focus straight back to the previous window when the panel
-/// is shown without user input (launch from a terminal, second instance). A
-/// blur in the first moments after showing is that, not the user leaving.
+/// is shown without user input (launch from a terminal, second instance), or
+/// refuse it outright. A blur in the first moments after showing is that, not
+/// the user leaving; once they are over, an unfocused panel takes focus again,
+/// since a panel that does not have it never sees the click that should hide it.
 const BLUR_GRACE_MS: u64 = 400;
 
 static SHOWN_AT: AtomicU64 = AtomicU64::new(0);
@@ -144,10 +146,20 @@ fn open_at(app: &AppHandle, panel: &WebviewWindow, anchor: Option<Rect>) {
         let _ = panel.set_position(pos);
     }
     HAD_FOCUS.store(false, Ordering::Relaxed);
-    SHOWN_AT.store(now_ms(), Ordering::Relaxed);
+    let shown = now_ms();
+    SHOWN_AT.store(shown, Ordering::Relaxed);
     let _ = panel.show();
     let _ = panel.unminimize();
     let _ = panel.set_focus();
+
+    let panel = panel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(BLUR_GRACE_MS + 50));
+        let same_show = SHOWN_AT.load(Ordering::Relaxed) == shown;
+        if same_show && panel.is_visible().unwrap_or(false) && !panel.is_focused().unwrap_or(true) {
+            let _ = panel.set_focus();
+        }
+    });
 }
 
 /// Anchor point (center of the tray icon, else the cursor) in physical pixels.
