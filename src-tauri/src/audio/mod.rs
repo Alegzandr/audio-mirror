@@ -1082,11 +1082,9 @@ mod tests {
             _shared: Arc<OutputShared>,
         ) -> Result<MonitorInit, Message> {
             self.built.lock().push(device.to_string());
-            if self
-                .panics_left
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-                .is_ok()
-            {
+            let left = self.panics_left.load(Ordering::Relaxed);
+            if left > 0 {
+                self.panics_left.store(left - 1, Ordering::Relaxed);
                 panic!("a backend blew up");
             }
             if self.captured.lock().contains(device) {
