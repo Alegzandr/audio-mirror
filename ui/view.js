@@ -105,6 +105,21 @@
   }
 
   /**
+   * The rows split the way the panel shows them: the outputs that are on,
+   * each with its controls, and the others, waiting to be added.
+   * @param {OutputInfo[]} rows From `outputRows`.
+   * @param {AppConfig} config
+   * @returns {{ active: OutputInfo[], others: OutputInfo[] }}
+   */
+  function splitOutputs(rows, config) {
+    const on = new Set(config.outputs.filter((o) => o.enabled).map((o) => o.id));
+    return {
+      active: rows.filter((r) => on.has(r.id)),
+      others: rows.filter((r) => !on.has(r.id)),
+    };
+  }
+
+  /**
    * The line in the header: what the engine is doing right now, counting
    * only the outputs the list shows.
    * @param {Status | null} status
@@ -174,6 +189,7 @@
     meterDb,
     sourceName,
     outputRows,
+    splitOutputs,
     capturedOutput,
     runState,
     outputState,

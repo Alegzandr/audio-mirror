@@ -48,7 +48,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: Frontend syntax
         run: for f in ui/*.js tests/ui/*.js; do node --check "$f"; done
       - name: Frontend types

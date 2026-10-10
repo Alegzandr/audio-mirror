@@ -31,6 +31,8 @@ interface OutputInfo {
   id: string;
   name: string;
   is_default: boolean;
+  /** The part of `name` the user can rename in the system; null where the system does not allow it. */
+  description: string | null;
 }
 
 /** `audio::DeviceList` */
@@ -97,6 +99,11 @@ interface Commands {
   set_output_enabled: { args: { id: string; name: string; enabled: boolean }; result: void };
   set_output_volume: { args: { id: string; name: string; fader: number; persist: boolean }; result: void };
   set_output_muted: { args: { id: string; name: string; muted: boolean }; result: void };
+  source_menu: {
+    args: { entries: { id: string | null; label: string; checked: boolean }[]; x: number; y: number };
+    result: void;
+  };
+  rename_output: { args: { id: string; description: string }; result: void };
   set_autostart: { args: { enabled: boolean }; result: boolean };
   hide_panel: { args: void; result: void };
   restart: { args: void; result: void };
@@ -112,6 +119,8 @@ type Invoke = <K extends Command>(cmd: K, ...args: CommandArgs<K>) => Promise<Co
 /** Events emitted by the Rust side. */
 interface Events {
   "update-ready": string;
+  /** A source picked in the native source menu (macOS). */
+  "source-picked": string;
 }
 
 type Listen = <E extends keyof Events>(
@@ -126,11 +135,19 @@ interface Window {
     event: { listen: Listen };
   };
   /** Browser preview state, see `demoInvoke` in app.js. */
-  __demo?: { config: AppConfig };
+  __demo?: { config: AppConfig; names: Record<string, [string, string]> };
   /** Interface language from the system locale, injected by `i18n.rs`. */
   __AUDIO_MIRROR_LANG__?: string;
+  /** Material under the page, injected by `glass.rs`: "liquid", "native" or "none". */
+  __AUDIO_MIRROR_GLASS__?: string;
   /** Set by `ui/i18n.js`, which loads before the page script. */
   I18n: I18n;
+  /** Set by `ui/refraction.js`, which loads before the page script. */
+  Refraction: {
+    /** Whether this engine runs SVG filters as a backdrop filter (Chromium). */
+    supported: boolean;
+    apply(el: HTMLElement, options?: { bezel?: number; thickness?: number; blur?: number }): void;
+  };
   /** Set by `ui/view.js`, which loads before the page script. */
   View: View;
 }
@@ -145,6 +162,7 @@ interface View {
   meterDb(level: number): number;
   sourceName(source: SourceInfo): string;
   outputRows(devices: DeviceList, config: AppConfig): OutputInfo[];
+  splitOutputs(rows: OutputInfo[], config: AppConfig): { active: OutputInfo[]; others: OutputInfo[] };
   capturedOutput(devices: DeviceList, config: AppConfig): string | null;
   runState(status: Status | null, rows: OutputInfo[]): { text: string; tone: string };
   outputState(

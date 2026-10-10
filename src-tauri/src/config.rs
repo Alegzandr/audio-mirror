@@ -53,15 +53,20 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn load(path: &Path) -> Self {
-        let mut cfg: Self = match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                // Keep the unreadable file aside instead of overwriting it
-                // with the next change.
-                log::warn!("config: {e}, starting from defaults");
-                let _ = std::fs::rename(path, path.with_extension("json.bak"));
-                Self::default()
-            }),
-            Err(_) => Self::default(),
+        // Keep a file that cannot be used aside instead of overwriting it
+        // with the next change.
+        let set_aside = |why: &dyn std::fmt::Display| {
+            log::warn!("config: {why}, starting from defaults");
+            let _ = std::fs::rename(path, path.with_extension("json.bak"));
+            Self::default()
+        };
+        let mut cfg: Self = match std::fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(cfg) => cfg,
+                Err(e) => set_aside(&e),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => set_aside(&e),
         };
         if cfg.source.is_empty() {
             cfg.source = DESKTOP.into();
@@ -82,7 +87,14 @@ impl AppConfig {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&serde_json::to_vec_pretty(self)?)?;
+            // On disk before the rename, so a power cut cannot leave an
+            // empty settings file in place of the old one.
+            file.sync_all()?;
+        }
         std::fs::rename(tmp, path)
     }
 

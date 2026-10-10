@@ -585,6 +585,7 @@ pub fn enumerate() -> Result<DeviceList, Message> {
                 id: uid.clone(),
                 name: name.clone(),
                 is_default: default_out == Some(id),
+                description: None,
             });
         }
         if has_streams(id, kAudioObjectPropertyScopeInput) {
@@ -689,6 +690,9 @@ pub fn watch_system(callback: EventCallback) -> Option<Box<dyn std::any::Any + S
 struct SckShared {
     hub: Arc<SourceHub>,
     state: Mutex<CaptureState>,
+    /// Set once the capture is given up: a stream that answers late, or
+    /// whose stop times out, must not feed the hub the next capture uses.
+    detached: AtomicBool,
 }
 
 struct OutputIvars {
@@ -737,6 +741,9 @@ impl ScreenCaptureDelegate {
 
 /// `screen_stream_audio_update`.
 fn screen_stream_audio_update(shared: &SckShared, sample_buffer: &CMSampleBuffer) {
+    if shared.detached.load(Ordering::Acquire) {
+        return;
+    }
     let sbuf = sample_buffer as *const CMSampleBuffer as *const c_void;
     // SAFETY: CoreMedia getters on a live sample buffer.
     unsafe {
@@ -802,6 +809,7 @@ impl Capture for SckCapture {
 
 impl Drop for SckCapture {
     fn drop(&mut self) {
+        self.shared.detached.store(true, Ordering::Release);
         let (tx, rx) = mpsc::channel();
         let block = RcBlock::new(move |_err: *mut NSError| {
             let _ = tx.send(());
@@ -864,6 +872,7 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
         let shared = Arc::new(SckShared {
             hub,
             state: Mutex::new(CaptureState::Starting),
+            detached: AtomicBool::new(false),
         });
         let delegate = ScreenCaptureDelegate::new(shared.clone());
         let stream = SCStream::initWithFilter_configuration_delegate(
@@ -896,6 +905,12 @@ fn start_desktop(hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
         stream.startCaptureWithCompletionHandler(Some(&block));
         let started = rx.recv_timeout(Duration::from_secs(10)).unwrap_or(false);
         if !started {
+            // The start may still complete after the timeout: stop it, and
+            // keep its audio out of the hub the retry will share.
+            shared.detached.store(true, Ordering::Release);
+            stream.stopCaptureWithCompletionHandler(None);
+            // The stream may still call the delegate until it has stopped.
+            std::mem::forget(delegate);
             return Err(msg::CAPTURE_START.into());
         }
 
@@ -946,6 +961,9 @@ impl RenderState {
 struct DeviceWatch {
     uid: String,
     state: Arc<Mutex<CaptureState>>,
+    /// Set by every notification, so one that arrives while the unit is
+    /// starting is not overwritten by the `Active` that follows.
+    notified: AtomicBool,
 }
 
 struct CoreAudioData {
@@ -1055,7 +1073,16 @@ impl CoreAudioData {
                 return false;
             }
 
-            desc.channels_per_frame = input.channels_per_frame.min(64);
+            // Only channel counts with a speaker layout can be converted (an
+            // interface with 7 or 18 inputs has none): ask AUHAL for the
+            // largest such count, which it fills from the first channels.
+            // Asking for every channel would leave the resampler unbuilt
+            // and the capture silent while it reports itself active.
+            let max = input.channels_per_frame.clamp(1, MAX_AUDIO_CHANNELS as u32);
+            desc.channels_per_frame = (1..=max)
+                .rev()
+                .find(|&c| Speakers::from_channels(c as usize) != Speakers::Unknown)
+                .unwrap_or(1);
             desc.sample_rate = input.sample_rate;
             if !ca_success(
                 AudioUnitSetProperty(
@@ -1230,6 +1257,7 @@ unsafe extern "C" fn device_notification(
     // once and never changed, so every holder only ever shares it.
     let watch = unsafe { &*(client_data as *const DeviceWatch) };
     log::info!("coreaudio: device '{}' disconnected or changed", watch.uid);
+    watch.notified.store(true, Ordering::Release);
     *watch.state.lock() = CaptureState::Retrying(msg::DEVICE_DISCONNECTED.into());
     noErr
 }
@@ -1240,6 +1268,8 @@ impl CoreAudioData {
         if self.au_initialized {
             return true;
         }
+        // Only a notification from this attempt on counts.
+        self.watch.notified.store(false, Ordering::Release);
         let Some(id) = device_id_for_uid(self.uid()) else {
             return false;
         };
@@ -1310,6 +1340,12 @@ impl CoreAudioData {
             }
         }
         self.active = true;
+        // The device went away or changed while the unit was starting: leave
+        // the `Retrying` it set, so the reconnect thread builds it again.
+        if self.watch.notified.swap(false, Ordering::AcqRel) {
+            self.set_state(CaptureState::Retrying(msg::DEVICE_DISCONNECTED.into()));
+            return true;
+        }
         self.set_state(CaptureState::Active {
             format: describe(self.spec.rate, self.spec.speakers.channels()),
         });
@@ -1423,6 +1459,7 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Messa
         watch: Box::new(DeviceWatch {
             uid: uid.to_string(),
             state: state.clone(),
+            notified: AtomicBool::new(false),
         }),
         unit: ptr::null_mut(),
         device_id: 0,
@@ -1563,11 +1600,17 @@ impl QueueMonitor {
             dst[head..].copy_from_slice(&back[..st.buffer_size - head]);
             st.new_data.drain(..st.buffer_size);
             (*buf).audio_data_byte_size = st.buffer_size as u32;
-            st.enqueued += (st.buffer_size / (size_of::<f32>() * self.channels)) as u64;
+            let frames = (st.buffer_size / (size_of::<f32>() * self.channels)) as u64;
             let stat = AudioQueueEnqueueBuffer(self.queue, buf, 0, ptr::null());
             if !ca_success(stat, "AudioQueueEnqueueBuffer") {
                 AudioQueueStop(self.queue, 0);
+                // Unlike OBS, the buffer is kept: the queue never calls back
+                // for one it did not take, so losing it would leave the
+                // queue a buffer short for good, and never dry again.
+                st.empty_buffers.push_back(buf);
+                return false;
             }
+            st.enqueued += frames;
         }
         true
     }

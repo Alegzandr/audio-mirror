@@ -42,6 +42,9 @@ jobs:
     needs: verify
     uses: ./.github/workflows/ci.yml
 
+  # Builds run every dependency's build script and never see the signing
+  # key, and they restore no cache another workflow could have written:
+  # what they produce is signed as is.
   build:
     name: Build (${{ matrix.name }})
     needs: [verify, tests]
@@ -68,7 +71,6 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
-          cache: npm
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
@@ -78,9 +80,7 @@ jobs:
       - uses: ./.github/actions/ffmpeg
         with:
           targets: ${{ matrix.ffmpeg }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: src-tauri
+          cache: false
       - run: npm ci --ignore-scripts
 
       - name: Windows, self-installing executable
@@ -91,40 +91,24 @@ jobs:
           mkdir -p dist
           cp src-tauri/target/release/audio-mirror.exe "dist/Audio-Mirror_${VERSION}_windows_x64_setup.exe"
 
-      # The signing key is only given to the steps that sign.
-      - name: Windows, updater signature
-        if: matrix.name == 'windows'
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri signer sign "dist/Audio-Mirror_${VERSION}_windows_x64_setup.exe"
-
+      # The AppImage is its own update file.
       - name: Linux, AppImage
         if: matrix.name == 'linux'
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npx tauri build --bundles appimage
+          npx tauri build --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
           mkdir -p dist
-          dir=src-tauri/target/release/bundle/appimage
-          out="dist/Audio-Mirror_${VERSION}_linux_x86_64.AppImage"
-          cp "$dir"/*.AppImage "$out"
-          cp "$dir"/*.AppImage.sig "$out.sig"
+          cp src-tauri/target/release/bundle/appimage/*.AppImage "dist/Audio-Mirror_${VERSION}_linux_x86_64.AppImage"
 
+      # The update file is the archive the bundler would have made: the .app
+      # folder at the top of a gzipped tar, without AppleDouble files.
       - name: macOS, universal app
         if: matrix.name == 'macos'
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npx tauri build --target universal-apple-darwin --bundles app
+          npx tauri build --target universal-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
           mkdir -p dist
           dir=src-tauri/target/universal-apple-darwin/release/bundle/macos
           base="dist/Audio-Mirror_${VERSION}_macos_universal"
-          cp "$dir"/*.app.tar.gz "$base.app.tar.gz"
-          cp "$dir"/*.app.tar.gz.sig "$base.app.tar.gz.sig"
+          COPYFILE_DISABLE=1 tar -czf "$base.app.tar.gz" -C "$dir" "Audio Mirror.app"
           ditto -c -k --keepParent "$dir/Audio Mirror.app" "$base.zip"
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -133,9 +117,44 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The only job that sees the signing key: a fresh runner that compiles
+  # nothing and runs only the Tauri CLI from the lockfile.
+  sign:
+    name: Sign updates
+    needs: [verify, build]
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Updater signatures
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npx tauri signer sign "dist/Audio-Mirror_${VERSION}_windows_x64_setup.exe"
+          npx tauri signer sign "dist/Audio-Mirror_${VERSION}_linux_x86_64.AppImage"
+          npx tauri signer sign "dist/Audio-Mirror_${VERSION}_macos_universal.app.tar.gz"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release
+          path: dist/*
+          if-no-files-found: error
+
   publish:
     name: Publish release
-    needs: [verify, build]
+    needs: [verify, sign]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -148,9 +167,8 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          pattern: dist-*
+          name: release
           path: dist
-          merge-multiple: true
       - name: Update manifest
         run: ./scripts/latest-json.sh dist "$VERSION" "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" > dist/latest.json
       - name: Release GitHub

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Audio Mirror, Pochette Factory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..600&display=swap" rel="stylesheet">
+<style>
+  :root { --k: #0b0b0b; --w: #f4f4f0; --g: #7a7a76; --l: #262624; --c1: #e6332a; --c2: #2b6cb0; --c3: #e8c547; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 380px; height: 560px; overflow: hidden; background: var(--k); }
+  body { font: 400 13px/1.35 "Archivo", sans-serif; font-stretch: 85%; color: var(--w); padding: 18px 20px; }
+  .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .cat { font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--g); }
+  svg { display: block; margin: 10px auto 6px; }
+  .src { display: flex; justify-content: space-between; font-size: 12px; color: var(--g); letter-spacing: 0.04em; }
+  .src b { color: var(--w); font-weight: 500; }
+  .list { margin-top: 18px; }
+  .item { display: grid; grid-template-columns: 40px 1fr auto; gap: 4px 10px; padding: 11px 0; border-top: 1px solid var(--l); align-items: center; }
+  .num { font-size: 11px; letter-spacing: 0.12em; color: var(--g); }
+  .name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .state { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--g); }
+  .strip { grid-column: 1; height: 4px; width: 28px; }
+  .ctl { grid-column: 2 / 4; display: flex; align-items: center; gap: 12px; }
+  .line { flex: 1; height: 1px; background: #3a3a37; position: relative; }
+  .line b { position: absolute; left: 0; top: -1px; height: 3px; background: var(--w); }
+  .line u { position: absolute; top: -6px; width: 2px; height: 13px; background: var(--w); }
+  .db { font-size: 12px; color: var(--g); width: 52px; text-align: right; }
+  .btn { font: inherit; font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--w); background: none; border: 1px solid #4a4a46; padding: 4px 9px; }
+  .err .state { color: var(--c1); }
+  .foot { position: absolute; left: 20px; right: 20px; bottom: 16px; display: flex; justify-content: space-between; font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--g); }
+</style>
+</head>
+<body>
+  <div class="top"><span class="cat">Audio Mirror</span><span class="cat">AM 00 · 2 / 3</span></div>
+  <svg width="300" height="150" viewBox="0 0 300 150" fill="var(--k)" stroke="var(--w)" stroke-width="1.1" stroke-linejoin="round">
+    <path d="M40 20 L110 20 L122 18 L130 22 L140 10 L148 24 L158 16 L170 20 L260 20"/>
+    <path d="M40 30 L105 30 L118 26 L128 32 L138 14 L146 34 L156 22 L168 30 L260 30"/>
+    <path d="M40 40 L100 40 L114 36 L126 40 L136 18 L144 44 L152 28 L166 38 L182 36 L260 40"/>
+    <path d="M40 50 L96 50 L112 44 L124 50 L134 20 L142 52 L150 30 L164 46 L180 44 L260 50"/>
+    <path d="M40 60 L98 60 L110 54 L122 58 L132 26 L140 62 L150 34 L162 56 L178 52 L260 60"/>
+    <path d="M40 70 L100 70 L112 62 L120 68 L130 30 L138 74 L148 40 L160 64 L176 60 L260 70"/>
+    <path d="M40 80 L104 80 L114 74 L122 78 L130 42 L138 84 L146 50 L158 74 L174 70 L260 80"/>
+    <path d="M40 90 L108 90 L116 84 L124 88 L132 56 L140 94 L148 62 L158 84 L172 82 L260 90"/>
+    <path d="M40 100 L112 100 L120 96 L128 98 L136 72 L144 104 L152 76 L162 96 L260 100"/>
+    <path d="M40 110 L116 110 L124 106 L132 108 L140 88 L148 112 L156 92 L166 108 L260 110"/>
+    <path d="M40 120 L120 120 L130 116 L138 118 L146 104 L154 122 L162 108 L260 120"/>
+    <path d="M40 130 L126 130 L136 126 L144 128 L152 118 L160 132 L168 122 L260 130"/>
+    <path d="M40 140 L260 140"/>
+  </svg>
+  <div class="src"><span>Source · <b>Sortie par défaut (Speakers)</b></span><span>−8,7 dB</span></div>
+
+  <div class="list">
+    <div class="item">
+      <span class="num">AM 01</span><span class="name">Headphones (USB Audio)</span><span class="state">En lecture</span>
+      <span class="strip" style="background:var(--c2)"></span>
+      <div class="ctl"><div class="line"><b style="width:76%"></b><u style="left:76%"></u></div><span class="db">−4,0 dB</span><button class="btn">Couper</button></div>
+    </div>
+    <div class="item">
+      <span class="num">AM 02</span><span class="name">OBS (VB-Audio Virtual Cable)</span><span class="state">En lecture</span>
+      <span class="strip" style="background:var(--c3)"></span>
+      <div class="ctl"><div class="line"><b style="width:96%"></b><u style="left:96%"></u></div><span class="db">0,0 dB</span><button class="btn">Couper</button></div>
+    </div>
+    <div class="item err">
+      <span class="num">AM 03</span><span class="name">LG ULTRAGEAR (NVIDIA)</span><span class="state">Indisponible</span>
+      <span class="strip" style="background:var(--c1)"></span>
+      <div class="ctl"><span class="db" style="text-align:left;width:auto">Déconnecté. Nouvel essai.</span></div>
+    </div>
+  </div>
+  <div class="foot"><span>+ 2 autres</span><span>Modifier</span><span>Quitter</span></div>
+</body>
+</html>

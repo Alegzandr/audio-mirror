@@ -86,6 +86,9 @@ pub struct OutputInfo {
     pub id: String,
     pub name: String,
     pub is_default: bool,
+    /// The part of `name` the user can change in the system, where the
+    /// system allows it ([`rename_output`]); `None` elsewhere.
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -168,6 +171,31 @@ pub fn enumerate() -> Result<DeviceList, Message> {
         }
     }
     Ok(list)
+}
+
+/// Renames an output device in the system, so every application shows the
+/// new name. Only Windows lets a user program do that: macOS keeps hardware
+/// device names read-only, and PipeWire only keeps a new name through a
+/// WirePlumber rule that takes a restart of the whole sound server.
+pub fn rename_output(id: &str, description: &str) -> Result<(), Message> {
+    const MAX_DEVICE_NAME: usize = 64;
+    let description = description.trim();
+    // The name lands in the system's device store and every application
+    // reads it back: no control characters (a line break, a NUL) and a
+    // length a device name can reasonably have.
+    if description.is_empty()
+        || description.chars().count() > MAX_DEVICE_NAME
+        || description.chars().any(char::is_control)
+    {
+        return Err(msg::INVALID_DEVICE_NAME.into());
+    }
+    #[cfg(windows)]
+    return platform::rename_output(id, description);
+    #[cfg(not(windows))]
+    {
+        let _ = id;
+        Err(msg::SYSTEM.detail("renaming a device is not supported on this system"))
+    }
 }
 
 /// State of the running capture, reported by the platform.
@@ -626,7 +654,10 @@ impl Supervisor {
             }
             log::error!("audio supervisor panicked, opening the devices again");
         }
-        log::error!("audio supervisor gave up after {PANIC_RESTARTS} panics");
+        log::error!(
+            "audio supervisor gave up after {} panics",
+            PANIC_RESTARTS + 1
+        );
         *self.status.lock() = Status::default();
     }
 
@@ -711,7 +742,11 @@ impl Supervisor {
             if session.slots.contains_key(&o.id) {
                 continue;
             }
-            if let Some(shared) = self.shared.lock().get(&o.id).cloned() {
+            // A statement of its own: an `if let` on the guard would keep
+            // the lock, and the UI thread's volume and status calls waiting
+            // on it, for as long as the device takes to open.
+            let shared = self.shared.lock().get(&o.id).cloned();
+            if let Some(shared) = shared {
                 session.create_monitor(&o.id, shared);
             }
         }
@@ -735,7 +770,8 @@ impl Supervisor {
                 // also re-evaluates the feedback-loop rule.
                 let ids: Vec<String> = session.slots.keys().cloned().collect();
                 for id in ids {
-                    if let Some(shared) = self.shared.lock().get(&id).cloned() {
+                    let shared = self.shared.lock().get(&id).cloned();
+                    if let Some(shared) = shared {
                         session.create_monitor(&id, shared);
                     }
                 }
