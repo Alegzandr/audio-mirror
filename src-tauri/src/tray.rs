@@ -316,13 +316,17 @@ fn panel_position(
     let (w, h) = size;
     let max_x = (work.x + work.w - w - margin).max(work.x);
     let max_y = (work.y + work.h - h - margin).max(work.y);
-    let centered_x = (anchor.0.round() as i32 - w / 2).clamp(work.x + margin, max_x);
-    let centered_y = (anchor.1.round() as i32 - h / 2).clamp(work.y + margin, max_y);
+    // A panel taller or wider than the work area minus the margins (a small
+    // screen at a high scale) drops the margin instead of panicking in clamp.
+    let min_x = (work.x + margin).min(max_x);
+    let min_y = (work.y + margin).min(max_y);
+    let centered_x = (anchor.0.round() as i32 - w / 2).clamp(min_x, max_x);
+    let centered_y = (anchor.1.round() as i32 - h / 2).clamp(min_y, max_y);
 
     match edge {
         Edge::Bottom => (centered_x, max_y),
-        Edge::Top => (centered_x, work.y + margin),
-        Edge::Left => (work.x + margin, centered_y),
+        Edge::Top => (centered_x, min_y),
+        Edge::Left => (min_x, centered_y),
         Edge::Right => (max_x, centered_y),
     }
 }
@@ -384,5 +388,17 @@ mod tests {
         assert_eq!(pos.1, 1080 - 560 - 12);
         let pos = panel_position(SCREEN, SCREEN, (1800.0, 5.0), PANEL_SIZE, 12);
         assert_eq!(pos.1, 12);
+    }
+
+    #[test]
+    fn a_panel_taller_than_the_work_area_does_not_panic() {
+        // 1366x768 at 125%: a 700 px panel in a 708 px work area.
+        let screen = area(0, 0, 1366, 768);
+        let work = area(0, 0, 1366, 708);
+        let pos = panel_position(screen, work, (1300.0, 740.0), (475, 700), 15);
+        assert_eq!(pos.1, 0);
+        let left = area(60, 0, 1306, 768);
+        let pos = panel_position(screen, left, (30.0, 400.0), (475, 760), 15);
+        assert_eq!(pos, (75, 0));
     }
 }

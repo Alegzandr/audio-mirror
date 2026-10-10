@@ -8,8 +8,31 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+/// Commands from `lib.rs`. Listing them makes each one denied unless a file in
+/// `capabilities/` grants it to a window, so the splash can only poll its
+/// progress and the panel cannot reach that command.
+const COMMANDS: &[&str] = &[
+    "snapshot",
+    "status",
+    "set_source",
+    "set_output_enabled",
+    "set_output_volume",
+    "set_output_muted",
+    "rename_output",
+    "source_menu",
+    "set_autostart",
+    "hide_panel",
+    "restart",
+    "quit",
+    "update_progress",
+];
+
 fn main() {
-    tauri_build::build();
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
+    )
+    .expect("tauri build");
 
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");

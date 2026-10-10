@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="styles.css">
   <script src="i18n.js" defer></script>
   <script src="view.js" defer></script>
+  <script src="refraction.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -20,22 +21,34 @@
     <main id="scroller">
       <section class="group" aria-labelledby="source-title">
         <h2 id="source-title" data-i18n="source.title">Source</h2>
-        <div class="list">
-          <div class="source">
-            <select id="source" class="select" aria-labelledby="source-title"></select>
+        <div class="platter source">
+            <select id="source" class="visually-hidden" aria-labelledby="source-title" tabindex="-1"></select>
+            <button type="button" class="picker" id="source-button" aria-haspopup="listbox" aria-expanded="false" aria-controls="source-menu" aria-labelledby="source-title source-button">
+              <span class="picker-label"></span>
+              <svg class="chevrons" width="9" height="13" viewBox="0 0 9 13" aria-hidden="true"><path d="M1.5 4.75L4.5 1.75l3 3M1.5 8.25l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
             <div class="level">
               <div class="meter" role="meter" aria-label="Source level" data-i18n-aria-label="source.level" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60" id="source-meter"><span></span></div>
               <span class="db" id="source-db"></span>
             </div>
             <p class="error" id="source-error" hidden></p>
-          </div>
         </div>
       </section>
 
       <section class="group" aria-labelledby="outputs-title">
-        <h2 id="outputs-title" data-i18n="outputs.title">Outputs</h2>
+        <div class="group-head">
+          <h2 id="outputs-title" data-i18n="outputs.title">Outputs</h2>
+          <button type="button" class="btn btn-plain btn-small" id="edit" data-i18n="outputs.edit" hidden>Edit</button>
+        </div>
         <div class="list" id="outputs">
           <p class="row empty" data-i18n="outputs.searching">Looking for audio devices…</p>
+        </div>
+        <div class="others" id="others-group" hidden>
+          <button type="button" class="row disclosure" id="others-toggle" aria-expanded="false" aria-controls="others">
+            <span class="disclosure-label"></span>
+            <span class="disclosure-action"></span>
+          </button>
+          <div id="others" hidden></div>
         </div>
       </section>
     </main>
@@ -53,22 +66,43 @@
     </footer>
   </div>
 
+  <div class="menu" id="source-menu" role="listbox" aria-labelledby="source-title" hidden></div>
+
   <template id="output-row">
     <div class="row output">
       <div class="output-head">
-        <input type="checkbox" class="switch output-enabled">
-        <label class="output-name"></label>
+        <span class="output-name"></span>
+        <input type="text" class="output-rename" spellcheck="false" maxlength="64" hidden>
+        <span class="output-suffix" hidden></span>
         <span class="output-state"></span>
       </div>
       <div class="output-controls">
         <div class="fader-stack">
-          <input type="range" class="fader" min="0" max="1000" step="1">
+          <div class="capsule">
+            <span class="fill"></span>
+            <svg class="glyph" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 5.25h2.25L7 2.25v9.5L3.75 8.75H1.5z" fill="currentColor"/><path d="M9.25 4.75a3 3 0 0 1 0 4.5M11 3a5.5 5.5 0 0 1 0 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+            <input type="range" class="fader" min="0" max="1000" step="1">
+          </div>
           <div class="meter output-meter" role="meter" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60"><span></span></div>
         </div>
         <span class="db output-db"></span>
-        <button type="button" class="btn btn-toggle output-mute" aria-pressed="false" data-i18n="output.mute">Mute</button>
+        <button type="button" class="btn btn-round output-mute" aria-pressed="false">
+          <svg class="on" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 5.25h2.25L7 2.25v9.5L3.75 8.75H1.5z" fill="currentColor"/><path d="M9.25 4.75a3 3 0 0 1 0 4.5M11 3a5.5 5.5 0 0 1 0 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          <svg class="off" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 5.25h2.25L7 2.25v9.5L3.75 8.75H1.5z" fill="currentColor"/><path d="M9.5 5l3.5 4M13 5l-3.5 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="output-edit">
+        <button type="button" class="btn btn-small output-rename-btn" data-i18n="output.rename">Rename</button>
+        <button type="button" class="btn btn-small output-remove" data-i18n="output.remove">Remove</button>
       </div>
       <p class="output-detail"></p>
+    </div>
+  </template>
+
+  <template id="other-row">
+    <div class="row other">
+      <span class="other-name"></span>
+      <button type="button" class="btn btn-small other-add" data-i18n="output.add">Add</button>
     </div>
   </template>
 </body>

@@ -8,6 +8,7 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -18,6 +19,11 @@
         "maximizable": false,
         "minimizable": false,
         "decorations": false,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["popover", "acrylic"],
+          "radius": 18
+        },
         "shadow": true,
         "skipTaskbar": true,
         "alwaysOnTop": true,
@@ -26,7 +32,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'",
+      "freezePrototype": true
     }
   },
   "bundle": {

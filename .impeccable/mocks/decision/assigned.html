@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Audio Mirror, Télétexte</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --k: #000; --w: #fff; --y: #ffff00; --c: #00ffff; --g: #00ff00; --m: #ff00ff; --r: #ff2020; --b: #2020ff;
+    --row: 20px;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 380px; height: 560px; overflow: hidden; background: var(--k); }
+  body { font: 20px/var(--row) "VT323", monospace; color: var(--w); padding: 6px 10px; letter-spacing: 0.02em; }
+  .row { height: var(--row); display: flex; align-items: center; white-space: nowrap; }
+  .dbl { height: calc(var(--row) * 2); }
+  .dbl > .t { display: inline-block; transform: scaleY(2); transform-origin: 0 50%; }
+  .band { padding: 0 6px; color: var(--k); }
+  .sp { flex: 1; }
+  .y { color: var(--y); } .c { color: var(--c); } .g { color: var(--g); } .m { color: var(--m); } .r { color: var(--r); }
+  .bg-y { background: var(--y); } .bg-c { background: var(--c); } .bg-g { background: var(--g); } .bg-r { background: var(--r); } .bg-b { background: var(--b); color: var(--w); } .bg-m { background: var(--m); }
+  /* Signature: the source history as teletext mosaic, one column per 100 ms. */
+  .mosaic { display: grid; grid-template-columns: repeat(36, 1fr); height: 46px; align-items: end; gap: 0 1px; margin: 4px 0 2px; }
+  .mosaic i { display: block; background: var(--g); }
+  .bar { flex: 1; height: 12px; background: #003300; position: relative; }
+  .bar b { position: absolute; inset: 0 auto 0 0; background: var(--g); }
+  .bar u { position: absolute; top: -4px; width: 8px; height: 20px; background: var(--w); }
+  .btn { padding: 0 8px; height: 20px; line-height: 20px; color: var(--k); }
+  .gap { height: 8px; }
+  .fast { position: absolute; left: 10px; right: 10px; bottom: 8px; display: flex; gap: 14px; }
+</style>
+</head>
+<body>
+  <div class="row"><span class="y">P100</span>&nbsp;<span>AUDIO MIRROR</span><span class="sp"></span><span class="c">2 SUR 3</span>&nbsp;<span class="y">21:04:37</span></div>
+  <div class="gap"></div>
+  <div class="row dbl band bg-y"><span class="t">SOURCE</span><span class="sp"></span><span>CHANGER</span></div>
+  <div class="row c">Sortie par défaut (Speakers)</div>
+  <div class="mosaic">
+    <i style="height:30%"></i><i style="height:42%"></i><i style="height:55%"></i><i style="height:48%"></i><i style="height:62%"></i><i style="height:70%"></i><i style="height:66%"></i><i style="height:74%"></i><i style="height:58%"></i><i style="height:52%"></i><i style="height:60%"></i><i style="height:78%"></i>
+    <i style="height:84%"></i><i style="height:80%"></i><i style="height:72%"></i><i style="height:64%"></i><i style="height:70%"></i><i style="height:76%"></i><i style="height:68%"></i><i style="height:56%"></i><i style="height:44%"></i><i style="height:50%"></i><i style="height:62%"></i><i style="height:72%"></i>
+    <i style="height:86%"></i><i style="height:90%"></i><i style="height:82%"></i><i style="height:74%"></i><i style="height:66%"></i><i style="height:70%"></i><i style="height:78%"></i><i style="height:72%"></i><i style="height:64%"></i><i style="height:58%"></i><i style="height:66%"></i><i style="height:71%"></i>
+  </div>
+  <div class="row"><span class="g">NIVEAU</span><span class="sp"></span><span>−8,7 dB</span></div>
+  <div class="gap"></div>
+  <div class="row dbl band bg-c"><span class="t">SORTIES</span><span class="sp"></span><span>MODIFIER</span></div>
+
+  <div class="row"><span>Headphones (USB Audio)</span><span class="sp"></span><span class="g">EN LECTURE</span></div>
+  <div class="row" style="gap:8px"><div class="bar"><b style="width:76%"></b><u style="left:76%"></u></div><span style="width:62px;text-align:right">−4,0 dB</span><span class="btn bg-m">COUPER</span></div>
+  <div class="gap"></div>
+  <div class="row"><span>OBS (VB-Audio Cable)</span><span class="sp"></span><span class="g">EN LECTURE</span></div>
+  <div class="row" style="gap:8px"><div class="bar"><b style="width:94%"></b><u style="left:94%"></u></div><span style="width:62px;text-align:right">0,0 dB</span><span class="btn bg-m">COUPER</span></div>
+  <div class="gap"></div>
+  <div class="row"><span>LG ULTRAGEAR (NVIDIA)</span><span class="sp"></span><span class="band bg-r">INDISPONIBLE</span></div>
+  <div class="row r">Déconnecté. Nouvel essai dans 3 s.</div>
+  <div class="gap"></div>
+  <div class="row band bg-b"><span>2 AUTRES PÉRIPHÉRIQUES</span><span class="sp"></span><span class="y">AFFICHER</span></div>
+
+  <div class="fast row"><span class="g">DÉMARRAGE AUTO: OUI</span><span class="sp"></span><span class="c">v0.3.4</span><span class="r">QUITTER</span></div>
+</body>
+</html>

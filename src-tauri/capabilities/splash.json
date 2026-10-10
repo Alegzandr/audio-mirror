@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "splash",
+  "description": "Update splash: polls the update progress, nothing else",
+  "windows": ["splash"],
+  "permissions": ["allow-update-progress"]
+}

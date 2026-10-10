@@ -161,6 +161,9 @@ pub struct Resampler {
     /// Correction last handed to `swr_set_compensation`, in steps of
     /// [`DRIFT_DISTANCE_S`] output frames.
     drift_delta: c_int,
+    /// Output frames since the correction was last handed over: it lapses
+    /// after [`DRIFT_DISTANCE_S`] of output, so an unchanged one is renewed.
+    drift_frames: u64,
 }
 
 /// Span over which a drift correction is spread, in seconds of output. The
@@ -239,6 +242,7 @@ impl Resampler {
             buffers: vec![Plane::default(); planes],
             output_size: 0,
             drift_delta: 0,
+            drift_frames: 0,
         })
     }
 
@@ -247,7 +251,10 @@ impl Resampler {
     pub fn set_drift(&mut self, ppm: f64) {
         let distance = self.output_freq.saturating_mul(DRIFT_DISTANCE_S) as f64;
         let delta = (ppm * distance / 1e6).round() as c_int;
-        if delta == self.drift_delta {
+        // libswresample drops the correction once `distance` frames went
+        // out; a delta that never changes (one pinned at the limit) would
+        // otherwise stop being applied after an hour.
+        if delta == self.drift_delta && (self.drift_frames as f64) < distance / 2.0 {
             return;
         }
         // SAFETY: `ctx` is valid; the distance fits an int for any rate
@@ -258,6 +265,7 @@ impl Resampler {
             return;
         }
         self.drift_delta = delta;
+        self.drift_frames = 0;
     }
 
     /// `audio_resampler_resample`. Returns the number of output frames;
@@ -309,6 +317,7 @@ impl Resampler {
             log::error!("swr_convert failed: {ret}");
             return None;
         }
+        self.drift_frames += ret as u64;
         Some(ret as u32)
     }
 

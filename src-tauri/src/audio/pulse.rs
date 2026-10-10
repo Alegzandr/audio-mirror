@@ -647,6 +647,7 @@ pub fn enumerate() -> Result<DeviceList, Message> {
             id: sink.name,
             name: sink.description,
             is_default,
+            description: None,
         });
     }
     for source in pulse.source_list() {
@@ -700,7 +701,10 @@ struct CaptureData {
     stream: *mut pa_stream,
     spec: AudioSpec,
     bytes_per_frame: usize,
-    first_ts: u64,
+    /// Only touched on the mainloop thread; atomic because the supervisor
+    /// reads `state` through a shared reference at the same time, so the
+    /// callback cannot hold a `&mut` to the whole struct.
+    first_ts: AtomicU64,
     state: Mutex<CaptureState>,
 }
 
@@ -716,7 +720,7 @@ unsafe impl Send for PulseCapture {}
 extern "C" fn stream_read(_p: *mut pa_stream, _nbytes: usize, userdata: *mut c_void) {
     // SAFETY: userdata is the boxed `CaptureData`, alive until disconnect.
     unsafe {
-        let data = &mut *(userdata as *mut CaptureData);
+        let data = &*(userdata as *const CaptureData);
         if data.stream.is_null() {
             capture_loop().signal();
             return;
@@ -740,10 +744,11 @@ extern "C" fn stream_read(_p: *mut pa_stream, _nbytes: usize, userdata: *mut c_v
         let count = (bytes / data.bytes_per_frame) as u32;
         let timestamp =
             os_gettime_ns().saturating_sub(count as u64 * 1_000_000_000 / data.spec.rate as u64);
-        if data.first_ts == 0 {
-            data.first_ts = timestamp + STARTUP_TIMEOUT_NS;
+        if data.first_ts.load(Ordering::Relaxed) == 0 {
+            data.first_ts
+                .store(timestamp + STARTUP_TIMEOUT_NS, Ordering::Relaxed);
         }
-        if timestamp > data.first_ts {
+        if timestamp > data.first_ts.load(Ordering::Relaxed) {
             let slice = std::slice::from_raw_parts(frames as *const u8, bytes);
             data.hub.output_audio(&SourceAudio {
                 planes: &[slice],
@@ -799,7 +804,7 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
         },
         // SAFETY: valid spec.
         bytes_per_frame: unsafe { pa_frame_size(&spec) },
-        first_ts: 0,
+        first_ts: AtomicU64::new(0),
         state: Mutex::new(CaptureState::Starting),
     });
 
@@ -1074,6 +1079,20 @@ impl PulseMonitor {
 
         // SAFETY: stream used under the monitor mainloop lock.
         unsafe {
+            // Until the sink answers, nothing can be written: keep only what
+            // the first write takes rather than start the output up to
+            // `max_backlog` late, a level the drift loop would then hold.
+            // Pulse also refuses new buffer attributes on such a stream.
+            if pa_stream_get_state(data.stream) != PA_STREAM_READY {
+                let room = data.attr.tlength as usize;
+                if data.new_data.len() > room {
+                    let excess = data.new_data.len() - room;
+                    let excess = excess - excess % data.bytes_per_frame.max(1);
+                    data.new_data.drain(..excess);
+                }
+                return;
+            }
+
             // Grow the Pulse buffer when a large backlog built up. It is
             // never shrunk back, exactly as in `do_stream_write`, so the
             // added latency stays until the monitor is built again. Worth a
@@ -1085,13 +1104,18 @@ impl PulseMonitor {
                     data.attr.tlength,
                     data.new_data.len()
                 );
-                data.attr.fragsize = u32::MAX;
-                data.attr.maxlength = u32::MAX;
-                data.attr.prebuf = u32::MAX;
-                data.attr.minreq = u32::MAX;
-                data.attr.tlength = data.new_data.len().min(data.max_backlog) as u32;
-                let op = pa_stream_set_buffer_attr(data.stream, &data.attr, None, ptr::null_mut());
+                let attr = pa_buffer_attr {
+                    fragsize: u32::MAX,
+                    maxlength: u32::MAX,
+                    prebuf: u32::MAX,
+                    minreq: u32::MAX,
+                    tlength: data.new_data.len().min(data.max_backlog) as u32,
+                };
+                let op = pa_stream_set_buffer_attr(data.stream, &attr, None, ptr::null_mut());
+                // Kept only when Pulse took it, so the cork threshold below
+                // never waits for a buffer the stream does not have.
                 if !op.is_null() {
+                    data.attr = attr;
                     pa_operation_unref(op);
                 }
             }

@@ -126,6 +126,16 @@ test("an unplugged output is not listed, even when it is on", () => {
   assert.deepEqual([...rows].map((r) => r.id), ["a", "b"]);
 });
 
+test("the outputs that are on get controls, the others wait to be added", () => {
+  const rows = en.outputRows(devices, config([], "input:mic"));
+  const split = en.splitOutputs(rows, config([
+    { id: "b", name: "B", enabled: true, fader: 1, muted: false },
+    { id: "a", name: "A", enabled: false, fader: 1, muted: false },
+  ], "input:mic"));
+  assert.deepEqual([...split.active].map((r) => r.id), ["b"]);
+  assert.deepEqual([...split.others].map((r) => r.id), ["a"]);
+});
+
 test("the output the source records is the one that cannot be played into", () => {
   assert.equal(en.capturedOutput(devices, config([], "desktop")), "a");
   assert.equal(en.capturedOutput(devices, config([], "output:b")), "b");

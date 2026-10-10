@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Audio Mirror, Signalétique jaune</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --y: #ffd200; --k: #111; --ink: #141414; --w: #fff; --g: #2a2a2a; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 380px; height: 560px; overflow: hidden; background: var(--k); }
+  body { font: 500 14px/1.3 "Fira Sans", sans-serif; color: var(--w); padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .from { background: var(--g); padding: 10px 12px; }
+  .from small { display: block; font-size: 12px; color: #b5b5b5; }
+  .from strong { font-size: 18px; font-weight: 600; }
+  .lvl { margin-top: 8px; height: 6px; background: #444; } .lvl b { display: block; height: 100%; width: 72%; background: var(--w); }
+  .head { display: flex; justify-content: space-between; align-items: center; padding: 6px 2px 0; }
+  .head h1 { font-size: 15px; font-weight: 600; }
+  .head span { color: #b5b5b5; font-size: 13px; }
+  .band { background: var(--y); color: var(--ink); padding: 10px 12px 12px; }
+  .top { display: flex; align-items: baseline; gap: 10px; }
+  .name { font-size: 19px; font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .state { font-size: 13px; font-weight: 600; }
+  .sub { font-size: 12px; font-weight: 500; opacity: 0.75; }
+  .ctl { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .track { flex: 1; height: 6px; background: rgba(0,0,0,0.18); position: relative; }
+  .track b { position: absolute; inset: 0 auto 0 0; background: var(--ink); }
+  .track u { position: absolute; top: -6px; width: 18px; height: 18px; border-radius: 50%; background: var(--ink); border: 3px solid var(--y); margin-left: -9px; }
+  .db { font-size: 22px; font-weight: 700; width: 66px; text-align: right; font-variant-numeric: tabular-nums; }
+  .btn { font: inherit; font-weight: 600; font-size: 13px; color: var(--y); background: var(--ink); border: 0; padding: 7px 12px; }
+  .closed { background: var(--g); color: #ececec; }
+  .closed .name { color: var(--w); }
+  .closed .state { color: #ff8a7a; }
+  .more { display: flex; justify-content: space-between; align-items: center; padding: 6px 2px; color: #cfcfcf; }
+  .more .btn { background: var(--g); color: var(--w); }
+  .foot { margin-top: auto; display: flex; justify-content: space-between; color: #8f8f8f; font-size: 13px; padding: 0 2px; }
+</style>
+</head>
+<body>
+  <div class="from"><small>Depuis</small><strong>Sortie par défaut (Speakers)</strong><div class="lvl"><b></b></div></div>
+  <div class="head"><h1>Vers 3 sorties</h1><span>2 en lecture</span></div>
+  <div class="band">
+    <div class="top"><span class="name">Headphones</span><span class="state">En lecture</span></div>
+    <div class="sub">USB Audio</div>
+    <div class="ctl"><div class="track"><b style="width:76%"></b><u style="left:76%"></u></div><span class="db">−4,0</span><button class="btn">Couper</button></div>
+  </div>
+  <div class="band">
+    <div class="top"><span class="name">OBS</span><span class="state">En lecture</span></div>
+    <div class="sub">VB-Audio Virtual Cable</div>
+    <div class="ctl"><div class="track"><b style="width:96%"></b><u style="left:96%"></u></div><span class="db">0,0</span><button class="btn">Couper</button></div>
+  </div>
+  <div class="band closed">
+    <div class="top"><span class="name">LG ULTRAGEAR</span><span class="state">Indisponible</span></div>
+    <div class="sub">Déconnecté. Nouvel essai dans 3 s.</div>
+  </div>
+  <div class="more"><span>2 autres sorties</span><button class="btn">Afficher</button></div>
+  <div class="foot"><span>Lancer au démarrage : oui</span><span>Quitter</span></div>
+</body>
+</html>

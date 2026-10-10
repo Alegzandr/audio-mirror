@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rename-output"
+description = "Enables the rename_output command without any pre-configured scope."
+commands.allow = ["rename_output"]
+
+[[permission]]
+identifier = "deny-rename-output"
+description = "Denies the rename_output command without any pre-configured scope."
+commands.deny = ["rename_output"]

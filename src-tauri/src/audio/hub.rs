@@ -34,12 +34,19 @@ struct ProcessState {
 /// and call the monitors without holding the lock: one device blocking in
 /// `on_audio` then holds up neither the other outputs nor a monitor being
 /// added or removed.
+/// How long a removal waits for the packet being handed out: one packet is
+/// about 10 ms of audio.
+const PASS_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
 type Callbacks = Arc<Vec<(CallbackId, Arc<dyn AudioCallback>)>>;
 
 pub struct SourceHub {
     process: Mutex<ProcessState>,
     /// Guarded like `audio_cb_mutex`.
     callbacks: Mutex<Callbacks>,
+    /// Held by the capture thread while it calls the monitors, so a removal
+    /// can wait for the packet on its way; see [`SourceHub::remove_callback`].
+    passing: Mutex<()>,
     next_id: Mutex<CallbackId>,
     /// Peak of the converted audio since the last read. Owned by the engine
     /// and read in `Engine::status` like each output's, so every meter
@@ -57,6 +64,7 @@ impl SourceHub {
                 storage: [Vec::new(), Vec::new()],
             }),
             callbacks: Mutex::new(Callbacks::default()),
+            passing: Mutex::new(()),
             next_id: Mutex::new(1),
             peak,
         }
@@ -75,8 +83,15 @@ impl SourceHub {
     }
 
     /// `obs_source_remove_audio_capture_callback`.
+    ///
+    /// Waits, briefly, for a packet the capture thread is handing out, so the
+    /// monitor's last `Arc` stays with the caller: its device is then closed
+    /// on the supervisor before the same device is opened again, and never
+    /// on the capture thread, where closing would hold up every other
+    /// output. A monitor stuck in `on_audio` is not waited for, as before.
     pub fn remove_callback(&self, id: CallbackId) {
         Arc::make_mut(&mut self.callbacks.lock()).retain(|(i, _)| *i != id);
+        drop(self.passing.try_lock_for(PASS_WAIT));
     }
 
     /// `obs_source_output_audio`. Called on the capture thread.
@@ -98,8 +113,9 @@ impl SourceHub {
             frames: frames as u32,
         };
         // `source_signal_audio_data`: newest callback first. A monitor
-        // removed while a packet is on its way still receives it, and its
-        // last `Arc` is released here rather than in the supervisor.
+        // removed while a packet is on its way still receives it; the list
+        // is dropped before `passing` is released.
+        let _passing = self.passing.lock();
         let callbacks = self.callbacks.lock().clone();
         for (_, cb) in callbacks.iter().rev() {
             cb.on_audio(&data);

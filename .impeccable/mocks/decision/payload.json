@@ -1,0 +1,111 @@
+{
+  "title": "Choisir le monde visuel d'Audio Mirror",
+  "question": "Le tirage a désigné Télétexte. Garde-le, prends une alternative, ou relance. (Un challenger « console graphite pour développeurs », compétitif, attend dans la pioche de relance.)",
+  "options": [
+    {
+      "id": "assigned",
+      "label": "Télétexte",
+      "kicker": "THE ROLL",
+      "lineage": "Pages Ceefax et Antiope des années 80 et 90",
+      "thesis": "Le panneau comme une page de télétexte : tout est texte, en sept couleurs, sur du noir.",
+      "palette": ["#000000", "#ffffff", "#ffff00", "#00ffff", "#00ff00", "#ff00ff", "#ff0000"],
+      "materials": ["grille de caractères fixe", "bandeaux de couleur pleine", "mosaïque de blocs"],
+      "viewport": "Ligne d'en-tête P100 avec l'heure, bandeau jaune SOURCE, historique du niveau de la source en mosaïque, puis une page de sorties où chaque nom est un bandeau de couleur.",
+      "risk": "Peut virer gadget rétro si la grille n'est pas stricte, et les longs noms de périphériques supportent mal la police bitmap.",
+      "raised": [
+        { "from": "challenger-acetate", "raise": "Deux tailles de texte seulement, simple et double hauteur, font toute la hiérarchie." },
+        { "from": "challenger-wallet", "raise": "Rien ne disparaît : une sortie perdue garde sa ligne et son état s'y inscrit en toutes lettres." }
+      ],
+      "html": ".impeccable/mocks/decision/assigned.html",
+      "htmlFrame": "380x560"
+    },
+    {
+      "id": "challenger-splitflap",
+      "label": "Tableau des départs",
+      "verdict": "competitive",
+      "lineage": "Tableaux Solari des grandes gares",
+      "thesis": "Une source part vers N destinations, affichées comme des départs.",
+      "palette": ["#111111", "#1c1c1c", "#f2f2ee", "#f5a623", "#c8463c"],
+      "materials": ["palettes noires mates", "cadre acier brossé", "caractères en cellules"],
+      "viewport": "Colonnes fixes DESTINATION, VOLUME, ÉTAT ; chaque sortie est une ligne ; l'état se retourne lettre par lettre quand il change.",
+      "case": "Fusion propre et c'est aussi mon candidat préféré : plus clair que Télétexte, mais l'identification streamer est à peine meilleure. Gagne en clarté, égalité sur le public.",
+      "risk": "Les capitales condensées tronquent les noms longs, et l'animation de bascule coûte cher si elle n'est pas bornée.",
+      "hero": "https://impeccable.style/worlds/cards/signals-instruments-split-flap-concourse-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/signals-instruments-split-flap-concourse.webp",
+      "html": ".impeccable/mocks/decision/challenger-splitflap.html",
+      "htmlFrame": "380x560"
+    },
+    {
+      "id": "challenger-saville",
+      "label": "Pochette Factory",
+      "verdict": "competitive",
+      "lineage": "Identité de Peter Saville pour Factory Records",
+      "thesis": "Le son de la source tracé comme le pulsar d'Unknown Pleasures, en direct.",
+      "palette": ["#0b0b0b", "#f4f4f0", "#7a7a76", "#e6332a", "#2b6cb0", "#e8c547"],
+      "materials": ["noir mat", "lignes blanches au trait", "bandes de code couleur"],
+      "viewport": "Le tracé pulsar de la source occupe le haut du panneau ; dessous, les sorties numérotées AM 01, AM 02… avec leur nom en clair et une bande de couleur qui leur sert d'identité.",
+      "case": "Gagne sur l'identification (culture musicale, image iconique) mais perd en clarté : les noms codés en couleur du système d'origine sont remplacés par du texte.",
+      "risk": "Le tracé peut devenir une illustration décorative si on ne le relie pas clairement au niveau réel de la source.",
+      "hero": "https://impeccable.style/worlds/cards/brand-identity-canon-saville-catalog-sleeve-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/brand-identity-canon-saville-catalog-sleeve.webp",
+      "html": ".impeccable/mocks/decision/challenger-saville.html",
+      "htmlFrame": "380x560"
+    },
+    {
+      "id": "challenger-wayfinding",
+      "label": "Signalétique jaune",
+      "verdict": "competitive",
+      "lineage": "Signalétique d'aéroport (Schiphol)",
+      "thesis": "Chaque sortie est un panneau qui dit où va le son, à lire en une seconde.",
+      "palette": ["#ffd200", "#111111", "#ffffff", "#2a2a2a"],
+      "materials": ["bandeaux jaunes suspendus", "inserts noirs", "sans humaniste"],
+      "viewport": "Bandeau DEPUIS avec la source, puis un bandeau jaune par sortie avec nom, volume et état ; les routes fermées quittent le panneau.",
+      "case": "Gagne en clarté (la signalétique, c'est la lisibilité même) mais l'univers aéroport ne parle pas spécialement aux streamers.",
+      "risk": "Un jaune plein très lumineux à côté d'un jeu en pleine nuit.",
+      "hero": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-terminal-yellow-wayfinding-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-terminal-yellow-wayfinding.webp",
+      "html": ".impeccable/mocks/decision/challenger-wayfinding.html",
+      "htmlFrame": "380x560"
+    },
+    {
+      "id": "challenger-acetate",
+      "label": "Manuel à intercalaires",
+      "verdict": "declined",
+      "lineage": "Manuels de logiciels en boîte, feuillets d'acétate",
+      "palette": ["#e8a317", "#f4f1e8", "#1d4e89", "#d9381e"],
+      "materials": ["acétate laiteux", "intercalaires colorés"],
+      "thesis": "Chaque sortie comme un feuillet posé sur un intercalaire coloré.",
+      "viewport": "Un rail d'onglets sur le bord, une sortie par feuillet.",
+      "risk": "Lent à lire d'un coup d'œil.",
+      "case": "Perd sur les deux axes : les streamers ne s'y reconnaissent pas, et l'empilement de feuillets brouille la lecture.",
+      "kept": "Sa discipline typographique : une seule taille fait le travail.",
+      "hero": "https://impeccable.style/worlds/cards/rw-manual-acetate-tab-board-hero.webp"
+    },
+    {
+      "id": "challenger-wallet",
+      "label": "Pochette de billets",
+      "verdict": "declined",
+      "lineage": "Billets d'avion carbonés des années 60",
+      "palette": ["#1b2a4a", "#c8102e", "#f7f5ef", "#5b3f8c"],
+      "materials": ["papier coupon", "chiffres carbone"],
+      "thesis": "Chaque sortie comme un coupon tamponné.",
+      "viewport": "Un carnet de coupons, un par sortie.",
+      "risk": "Trop papier pour un outil qu'on regarde trois secondes.",
+      "case": "Perd sur les deux axes : métaphore du voyage loin du son, et des coupons trop chargés pour un panneau.",
+      "kept": "Sa règle d'état : rien ne disparaît, tout s'annule en toutes lettres."
+    }
+  ],
+  "reroll": { "registers": ["safer", "bolder"] },
+  "canon": true,
+  "canonCard": {
+    "label": "Le standard de la catégorie",
+    "thesis": "Un panneau Windows 11 natif, comme les Paramètres rapides, exécuté à la perfection.",
+    "palette": ["#202020", "#2b2b2b", "#ffffff", "#60cdff"],
+    "materials": ["Mica translucide", "tuiles arrondies", "Segoe UI Variable"],
+    "viewport": "Fond Mica, grandes tuiles par sortie avec curseur Fluent, couleur d'accent du système.",
+    "risk": "Impossible à distinguer d'un réglage Windows, par construction.",
+    "html": ".impeccable/mocks/decision/canon.html",
+    "htmlFrame": "380x560"
+  },
+  "steer": true
+}

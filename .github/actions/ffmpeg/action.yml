@@ -4,11 +4,14 @@ inputs:
   targets:
     description: Space separated Rust target triples
     required: true
+  cache:
+    description: Restore and save the built libraries (off for release builds)
+    default: "true"
 runs:
   using: composite
   steps:
     - name: Cache (vcpkg)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.cache == 'true'
       uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: ${{ env.LOCALAPPDATA }}\vcpkg\archives
@@ -21,7 +24,7 @@ runs:
         "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
 
     - name: Cache (source build)
-      if: runner.os != 'Windows'
+      if: runner.os != 'Windows' && inputs.cache == 'true'
       uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: third_party/ffmpeg

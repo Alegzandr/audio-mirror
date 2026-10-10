@@ -13,13 +13,13 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/panel-dark.png">
-    <img alt="The Audio Mirror panel: the default output is mirrored to headphones and a virtual cable, each with its own volume slider and Mute button" src="docs/images/panel-light.png" width="380">
+    <img alt="The Audio Mirror panel: the default output is mirrored to headphones and a virtual cable, each with its own volume slider and mute button" src="docs/images/panel-light.png" width="380">
   </picture>
 </p>
 
 You are streaming or recording. You want to hear your computer in your headphones, and you also need the same sound in a virtual cable, a capture card or a second PC. Windows, macOS and Linux only play sound on one device at a time. Audio Mirror fixes that.
 
-It sits in your tray. Pick a source, switch on the outputs that should play it, set each volume, and forget about it. It uses the same audio engine as OBS Studio's audio monitoring, the one streamers already trust on stage, without opening OBS and for several outputs at once.
+It sits in your tray. Pick a source, add the outputs that should play it, set each volume, and forget about it. It uses the same audio engine as OBS Studio's audio monitoring, the one streamers already trust on stage, without opening OBS and for several outputs at once.
 
 ## Contents
 
@@ -100,8 +100,8 @@ Most Linux trays do not report clicks on the icon itself: open the panel with **
 
 1. **Open the panel.** Left click the tray icon (on Linux, use **Open Audio Mirror** in its menu).
 2. **Pick a source.** Leave it on **Default output** to mirror everything your computer plays. The meter under the list moves when sound is coming in.
-3. **Switch on your outputs.** Every output device is listed. Turn on the ones that should play the source; mirroring starts as soon as one is on.
-4. **Set the volumes.** Drag each slider, or click **Mute** to silence one output without touching the others.
+3. **Add your outputs.** The devices that are not playing are folded under **other devices** at the bottom of the list: click **Show**, then **Add** next to the ones that should play the source. Mirroring starts as soon as one is added.
+4. **Set the volumes.** Drag each slider, or click the speaker button next to it to mute one output without touching the others.
 5. **Optional:** switch on **Start with system** at the bottom of the panel so the mirror is ready every time you log in.
 
 That's it. Click anywhere else or press <kbd>Esc</kbd> to hide the panel; the sound keeps flowing.
@@ -120,24 +120,22 @@ The meter and the dB reading under the list show the level coming in. If the sou
 
 ### Outputs
 
-Each output has a switch, a volume slider with its own level meter, and a **Mute** button. The top right corner of the panel sums everything up: **Off** when no output is on, **Mirroring to 2** when everything plays, **1 of 2 playing** when an output has a problem.
+Each output you added has a volume slider with its own level meter and a mute button (or press <kbd>M</kbd> while it has the focus). Click **Edit** above the list to **Rename** an output, where the system allows it, or **Remove** it from the mirror; it then goes back under **other devices**. The device being captured is never listed, so the sound cannot loop back into itself. The top right corner of the panel sums everything up: **Off** when no output is on, **Mirroring to 2** when everything plays, **1 of 2 playing** when an output has a problem.
 
 On the right of each output, a word tells you what it is doing:
 
 | Label | Meaning |
 | --- | --- |
 | Playing | Sound is going out. |
-| Muted | Running, but silenced by the **Mute** button. |
+| Muted | Running, but silenced by its mute button. |
 | Starting | The device is being opened. |
 | Waiting for source | The output is ready, the source is not. |
 | Unavailable | The device could not be opened. The reason is shown underneath and Audio Mirror tries again every 3 seconds. |
-| Skipped | This output is the device being captured. Playing into it would echo endlessly, so it is left out. |
-| Not connected | A device you had switched on is unplugged. It comes back by itself when you plug it in, or click **Forget** to remove it from the list. |
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/output-states-dark.png">
-    <img alt="The panel with a disconnected monitor marked Unavailable, Device disconnected, Retrying, and an unplugged Bluetooth speaker marked Not connected with a Forget button" src="docs/images/output-states-light.png" width="380">
+    <img alt="The panel with a disconnected monitor marked Unavailable, Device disconnected, Retrying, and two other devices folded under the outputs" src="docs/images/output-states-light.png" width="380">
   </picture>
 </p>
 
@@ -173,8 +171,8 @@ Make sure something is playing on the device you picked. On macOS, check that Au
 **An output says "Unavailable".**
 Read the reason under it. The device may be unplugged, turned off, or held in exclusive mode by another app (on Windows, see **Sound settings > device properties > Advanced**). Audio Mirror retries every 3 seconds, so fixing the cause is enough.
 
-**An output says "Skipped", or its switch is greyed out.**
-That device is the one being captured. Choose another source if you want to play on it.
+**An output is missing from the list.**
+If it is the device being captured, it is left out on purpose: choose another source if you want to play on it. An output you added that is unplugged disappears from the list and comes back by itself, with its volume and mute, when you plug it in.
 
 **I hear an echo or a doubled sound.**
 You are probably hearing the same audio twice: once from the system and once from the mirror, on two devices that are both in your ears. Mute one of them in Audio Mirror, or pick a source that is not already playing in your headphones.

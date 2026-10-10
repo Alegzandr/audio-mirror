@@ -1,69 +1,153 @@
+/* Audio Mirror: a Control Center module, macOS 27 "Golden Gate".
+
+   The window is transparent and the system draws the glass under the page
+   (`glass.rs`): real Liquid Glass on macOS 26 and later, vibrancy on older
+   macOS, Acrylic on Windows, nothing on Linux. `data-glass` says which, and
+   `--tint` is tuned to it so text reads over any wallpaper, as Golden Gate's
+   tinted setting does. Type is SF Pro where the system has it and the
+   bundled Inter elsewhere, tracked like SF Pro. Motion uses SwiftUI's
+   springs, sampled into `linear()`. */
+
+@font-face {
+  font-family: "Inter Mirror";
+  src: url("fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+}
+
 :root {
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, "Cantarell", "Ubuntu", "Noto Sans", sans-serif;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Mirror", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter Mirror", system-ui, sans-serif;
 
-  --bg: #f3f3f2;
-  --surface: #ffffff;
-  --surface-sunken: #e9e9e7;
-  --line: #e2e2e0;
-  --line-strong: #c9c9c6;
-  --text: #1c1c1e;
-  --text-2: #5f5f63;
-  --text-3: #707075;
-  --accent: #1f5fbf;
-  --accent-hover: #194f9f;
-  --accent-text: #ffffff;
-  --accent-soft: rgba(31, 95, 191, 0.12);
-  --danger: #b3261e;
-  --meter: #8a8a90;
-  --control: #ffffff;
-  --control-hover: #f5f5f4;
-  --control-active: #ebebea;
+  /* macOS tracks SF Pro by size on its own; Inter gets SF's table below. */
+  --track-12: 0em;
+  --track-13: 0em;
+  --track-15: 0em;
+  --track-17: 0em;
+  --w-regular: 400;
+  --w-medium: 500;
+  --w-semibold: 600;
+
+  --tint: rgba(246, 246, 248, 0.6);
+  --tint-solid: #ececee;
+  --platter: rgba(255, 255, 255, 0.55);
+  --rim-hi: rgba(255, 255, 255, 0.95);
+  --rim-lo: rgba(255, 255, 255, 0.25);
+  --edge: rgba(0, 0, 0, 0.07);
+  --hairline: rgba(0, 0, 0, 0.08);
+  --fill: rgba(0, 0, 0, 0.065);
+  --fill-active: rgba(0, 0, 0, 0.15);
+  --track: rgba(0, 0, 0, 0.09);
   --knob: #ffffff;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 1px rgba(0, 0, 0, 0.03);
+  --text: rgba(0, 0, 0, 0.87);
+  --text-2: rgba(0, 0, 0, 0.55);
+  --text-3: rgba(0, 0, 0, 0.4);
+  --accent: #007aff;
+  --accent-text: #ffffff;
+  --accent-soft: rgba(0, 122, 255, 0.18);
+  --danger: #e0352b;
+  --meter: rgba(0, 0, 0, 0.38);
+  --level: #ffffff;
+  --glyph-on-level: rgba(0, 0, 0, 0.6);
+  --menu: rgba(248, 248, 250, 0.6);
+  --shadow: 0 1px 1.5px rgba(0, 0, 0, 0.04), 0 3px 10px rgba(0, 0, 0, 0.04);
+  --menu-shadow: 0 10px 30px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.1);
+  --knob-shadow: 0 1px 2.5px rgba(0, 0, 0, 0.2), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
 
-  --radius: 10px;
-  --radius-sm: 6px;
-  --gutter: 16px;
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --radius-window: 18px;
+  --radius-platter: 16px;
+  --gutter: 12px;
+
+  /* Fallback curves; real springs below where `linear()` exists. */
+  --smooth: cubic-bezier(0.25, 1, 0.5, 1);
+  --snappy: cubic-bezier(0.25, 1.1, 0.5, 1);
+  --bouncy: cubic-bezier(0.3, 1.3, 0.5, 1);
+  --t-smooth: 500ms;
+  --t-snappy: 450ms;
+  --t-bouncy: 550ms;
+  --t-fast: 150ms;
 
   color-scheme: light;
 }
 
+/* SwiftUI's .smooth, .snappy and .bouncy (duration 0.5 s; bounce 0, 0.15, 0.3), integrated and sampled. */
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --smooth: linear(0, 0.0301, 0.1002, 0.1923, 0.2889, 0.3842, 0.4735, 0.5545, 0.6277, 0.6899, 0.7432, 0.7884, 0.8264, 0.8588, 0.885, 0.9067, 0.9244, 0.939, 0.9508, 0.9606, 0.9684, 0.9746, 0.9797, 0.9838, 0.9871, 0.9897, 0.9918, 0.9935, 0.9948, 0.9959, 0.9968, 0.9974, 0.998, 0.9984, 0.9987, 0.999, 1);
+    --snappy: linear(0, 0.0282, 0.0984, 0.1896, 0.2906, 0.3927, 0.4927, 0.5822, 0.6619, 0.7312, 0.7914, 0.8402, 0.8802, 0.9131, 0.9384, 0.958, 0.973, 0.9843, 0.9923, 0.9979, 1.0017, 1.004, 1.0053, 1.0059, 1.006, 1.0057, 1.0052, 1.0047, 1.004, 1.0034, 1.0029, 1.0023, 1.0019, 1.0015, 1.0011, 1.0009, 1);
+    --bouncy: linear(0, 0.0388, 0.1304, 0.2538, 0.3883, 0.5207, 0.6397, 0.7458, 0.8338, 0.9025, 0.9559, 0.9943, 1.02, 1.0354, 1.0432, 1.0454, 1.0436, 1.0394, 1.0337, 1.0276, 1.0218, 1.0162, 1.0115, 1.0075, 1.0044, 1.002, 1.0002, 0.9991, 0.9984, 0.998, 0.9979, 0.998, 0.9982, 0.9985, 0.9988, 0.999, 1);
+    --t-smooth: 760ms;
+    --t-snappy: 725ms;
+    --t-bouncy: 840ms;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1c1c1e;
-    --surface: #262628;
-    --surface-sunken: #1b1b1d;
-    --line: #333336;
-    --line-strong: #4a4a4e;
-    --text: #f2f2f3;
-    --text-2: #a6a6ab;
-    --text-3: #909096;
-    --accent: #4d8fe8;
-    --accent-hover: #6aa2ee;
-    --accent-text: #0d1a2c;
-    --accent-soft: rgba(77, 143, 232, 0.2);
-    --danger: #ff7b72;
-    --meter: #9d9da3;
-    --control: #313134;
-    --control-hover: #3a3a3d;
-    --control-active: #444448;
-    --knob: #f2f2f3;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --tint: rgba(28, 28, 30, 0.58);
+    --tint-solid: #1f1f21;
+    --platter: rgba(255, 255, 255, 0.075);
+    --rim-hi: rgba(255, 255, 255, 0.32);
+    --rim-lo: rgba(255, 255, 255, 0.06);
+    --edge: rgba(255, 255, 255, 0.05);
+    --hairline: rgba(255, 255, 255, 0.08);
+    --fill: rgba(255, 255, 255, 0.1);
+    --fill-active: rgba(255, 255, 255, 0.2);
+    --track: rgba(255, 255, 255, 0.11);
+    --text: rgba(255, 255, 255, 0.93);
+    --text-2: rgba(255, 255, 255, 0.6);
+    --text-3: rgba(255, 255, 255, 0.42);
+    --accent: #0a84ff;
+    --accent-soft: rgba(10, 132, 255, 0.28);
+    --danger: #ff6961;
+    --meter: rgba(255, 255, 255, 0.5);
+    --level: rgba(255, 255, 255, 0.94);
+    --menu: rgba(40, 40, 43, 0.52);
+    --shadow: 0 1px 1.5px rgba(0, 0, 0, 0.18), 0 4px 14px rgba(0, 0, 0, 0.12);
+    --menu-shadow: 0 12px 34px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
     color-scheme: dark;
   }
+}
+
+/* Real Liquid Glass already carries its own tint and contrast. */
+:root[data-glass="liquid"] { --tint: rgba(246, 246, 248, 0.22); }
+@media (prefers-color-scheme: dark) {
+  :root[data-glass="liquid"] { --tint: rgba(28, 28, 30, 0.22); }
+}
+:root[data-glass="none"] { --tint: var(--tint-solid); }
+
+/* Windows rounds an undecorated window with its own, smaller radius. */
+:root[data-os="windows"] { --radius-window: 8px; }
+
+/* Inter gets SF Pro's tracking table (12: 0, 13: -0.08, 15: -0.24,
+   17: -0.43 pt), a touch tighter since Inter is wider, and more weight,
+   since ClearType draws it thinner than macOS draws SF. */
+:root:not([data-os="macos"]) {
+  --track-12: -0.004em;
+  --track-13: -0.011em;
+  --track-15: -0.021em;
+  --track-17: -0.03em;
+  --w-regular: 430;
+  --w-medium: 530;
+  --w-semibold: 620;
 }
 
 * { box-sizing: border-box; }
 
 html, body { height: 100%; }
 
+html { background: transparent; }
+
 body {
   margin: 0;
-  background: var(--bg);
+  background: transparent;
   color: var(--text);
-  font: 13px/1.4 var(--font);
-  -webkit-font-smoothing: antialiased;
+  font: var(--w-regular) 13px/1.35 var(--font);
+  letter-spacing: var(--track-13);
+  font-optical-sizing: auto;
+  font-feature-settings: "kern", "calt";
+  text-rendering: optimizeLegibility;
   font-variant-numeric: tabular-nums;
   overflow: hidden;
   user-select: none;
@@ -71,23 +155,66 @@ body {
 }
 
 ::selection { background: var(--accent-soft); color: var(--text); }
-
-::-webkit-scrollbar { width: 10px; }
-::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
-  border-radius: 10px;
-  border: 3px solid var(--bg);
-}
-::-webkit-scrollbar-track { background: transparent; }
+input { caret-color: var(--accent); }
 
 h1, h2, p { margin: 0; }
 
-/* Panel frame: fixed header and footer, scrolling middle */
+svg { display: block; flex: none; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Liquid Glass rim: a 1px edge lit from the top left and the bottom right,
+   drawn as a masked gradient border on ::before. */
+.panel::before,
+.platter::before,
+.list > .row::before,
+.others::before,
+.menu::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(140deg, var(--rim-hi), var(--rim-lo) 32%, transparent 50%, var(--rim-lo) 70%, var(--rim-hi));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Real Liquid Glass lights its own edge. */
+:root[data-glass="liquid"] .panel::before { display: none; }
+
+/* Window */
 
 .panel {
+  position: relative;
   height: 100%;
   display: grid;
   grid-template-rows: auto 1fr auto;
+  background: var(--tint);
+  border-radius: var(--radius-window);
+  overflow: hidden;
+}
+
+/* The one authored moment: the content settles in as the panel opens, on
+   .snappy. The window and its glass appear at once (the system shows them),
+   so the tint stays put and only what sits on it moves: transform and
+   opacity alone, which the compositor runs off the main thread. */
+.panel.enter > * { animation: settle var(--t-snappy) var(--snappy) both; }
+.panel.enter > main { animation-delay: 20ms; }
+.panel.enter > .panel-foot { animation-delay: 40ms; }
+@keyframes settle {
+  from { opacity: 0.35; transform: translateY(6px) scale(0.985); }
+  30% { opacity: 1; }
 }
 
 .panel-head {
@@ -95,16 +222,14 @@ h1, h2, p { margin: 0; }
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
-  padding: 16px var(--gutter) 12px;
-  border-bottom: 1px solid transparent;
-  transition: border-color 150ms var(--ease);
+  padding: 16px 18px 10px;
+  transition: box-shadow var(--t-fast) ease;
 }
-.panel-head.scrolled { border-bottom-color: var(--line); }
+.panel-head.scrolled { box-shadow: 0 0.5px 0 var(--hairline); }
 
 .panel-head h1 {
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font: var(--w-semibold) 15px/1.2 var(--font-display);
+  letter-spacing: var(--track-15);
   white-space: nowrap;
 }
 
@@ -120,45 +245,71 @@ h1, h2, p { margin: 0; }
 
 main {
   overflow-y: auto;
-  padding: 4px var(--gutter) 16px;
+  padding: 2px var(--gutter) 12px;
   display: grid;
   align-content: start;
-  gap: 18px;
+  gap: 14px;
 }
+
+/* Overlay scroll bars: macOS draws its own; elsewhere they are imitated,
+   shown only while the list moves. */
+:root:not([data-os="macos"]) main::-webkit-scrollbar { width: 9px; }
+:root:not([data-os="macos"]) main::-webkit-scrollbar-track { background: transparent; }
+:root:not([data-os="macos"]) main::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9px;
+  border: 2.5px solid transparent;
+  background-clip: padding-box;
+}
+:root:not([data-os="macos"]) main.scrolling::-webkit-scrollbar-thumb { background-color: var(--fill-active); }
 
 .panel-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px var(--gutter);
-  border-top: 1px solid var(--line);
+  padding: 10px 16px 12px;
+  box-shadow: 0 -0.5px 0 var(--hairline);
 }
 
 .foot-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .version { color: var(--text-3); }
 .version[hidden] { display: none; }
 
-/* Groups */
+/* Groups and platters */
 
 .group { display: grid; gap: 6px; }
 
 .group h2 {
-  font-size: 13px;
-  font-weight: 600;
-  padding-left: 2px;
+  font-size: 12px;
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-12);
+  color: var(--text-2);
+  padding-left: 6px;
 }
 
-.list {
-  background: var(--surface);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  overflow: hidden;
+.group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  margin: -2px 0;
+}
+
+.list { display: grid; gap: 8px; }
+
+.platter,
+.list > .row,
+.others {
+  position: relative;
+  background: var(--platter);
+  border-radius: var(--radius-platter);
+  box-shadow: inset 0 0 0 0.5px var(--edge), var(--shadow);
 }
 
 .row {
@@ -169,15 +320,7 @@ main {
   padding: 10px 14px;
 }
 
-.row + .row,
-.note + .row { border-top: 1px solid var(--line); }
-
 .empty { color: var(--text-2); }
-
-.note {
-  color: var(--text-2);
-  padding: 10px 14px;
-}
 
 .error { color: var(--danger); }
 .error[hidden] { display: none; }
@@ -187,255 +330,406 @@ main {
 .source {
   display: grid;
   gap: 10px;
-  padding: 12px 14px;
+  padding: 8px 8px 12px;
 }
 
 .level {
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 0 6px;
 }
 
-/* Buttons */
+/* Source picker: a pop-up button */
+
+.picker {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px 6px 12px;
+  font: inherit;
+  font-weight: var(--w-medium);
+  color: var(--text);
+  text-align: left;
+  background: var(--fill);
+  border: 0;
+  border-radius: 10px;
+  cursor: default;
+  transition: background-color var(--t-fast) ease;
+}
+.picker[aria-expanded="true"] { background: var(--fill-active); }
+.picker-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chevrons { color: var(--text-2); }
+
+/* The menu: Liquid Glass that bends the panel under its rim (refraction.js). */
+
+.menu {
+  position: fixed;
+  z-index: 10;
+  padding: 5px;
+  overflow-y: auto;
+  background: var(--menu);
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 0.5px var(--edge), var(--menu-shadow);
+  backdrop-filter: blur(24px) saturate(1.6);
+  transform-origin: top center;
+  animation: menu-in var(--t-snappy) var(--snappy) both;
+  will-change: transform, opacity;
+}
+.menu[hidden] { display: none; }
+@keyframes menu-in {
+  from { opacity: 0; transform: scale(0.98); }
+  35% { opacity: 1; }
+}
+:root:not([data-os="macos"]) .menu::-webkit-scrollbar { width: 0; }
+
+.menu-header {
+  padding: 8px 10px 3px 30px;
+  font-size: 12px;
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-12);
+  color: var(--text-2);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 3px 10px 3px 8px;
+  border-radius: 8px;
+  outline: none;
+  cursor: default;
+}
+.menu-item:focus,
+.menu-item:focus-visible { background: var(--accent); color: var(--accent-text); }
+.menu-check { width: 14px; display: flex; justify-content: center; }
+.menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Buttons: glass capsules */
 
 .btn {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   font: inherit;
-  font-weight: 500;
+  font-weight: var(--w-medium);
   color: var(--text);
-  background: var(--control);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
+  background: var(--fill);
+  border: 0;
+  border-radius: 999px;
   padding: 4px 12px;
   min-height: 28px;
-  cursor: pointer;
+  cursor: default;
   white-space: nowrap;
-  transition: background-color 150ms var(--ease), border-color 150ms var(--ease), color 150ms var(--ease);
+  transition: background-color var(--t-fast) ease, color var(--t-fast) ease, transform var(--t-snappy) var(--snappy);
 }
-.btn:hover { background: var(--control-hover); }
-.btn:active { background: var(--control-active); }
+.btn:active { background: var(--fill-active); transform: scale(0.95); transition-duration: 80ms; }
 .btn:disabled { opacity: 0.5; cursor: default; }
-.btn:disabled:hover { background: var(--control); }
 .btn[hidden] { display: none; }
 
-.btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
-}
-.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-.btn-primary:active { background: var(--accent); }
+.btn-primary { background: var(--accent); color: var(--accent-text); }
+.btn-primary:active { background: var(--accent); filter: brightness(0.95); }
 
-.btn-plain {
-  background: transparent;
-  border-color: transparent;
-  color: var(--text-2);
-  padding: 4px 8px;
-}
-.btn-plain:hover { background: var(--control-active); color: var(--text); }
+.btn-plain { background: transparent; color: var(--text-2); padding: 4px 10px; }
 
-.btn-toggle { min-width: 68px; }
-.btn-toggle[aria-pressed="true"] {
-  background: var(--accent-soft);
-  border-color: transparent;
-  color: var(--accent);
-  font-weight: 600;
+.btn-small { min-height: 24px; padding: 2px 10px; font-size: 12px; letter-spacing: var(--track-12); }
+
+/* Header actions read as links in the accent, as macOS draws "Edit" and "Done". */
+#edit { color: var(--accent); }
+
+/* Mute: a round glass button that turns blue when it holds the sound, as Control Center does. */
+.btn-round {
+  width: 32px;
+  min-height: 32px;
+  height: 32px;
+  padding: 0;
 }
-.btn-toggle[aria-pressed="true"]:hover { background: var(--accent-soft); filter: brightness(0.97); }
+.btn-round[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+.btn-round .on { display: block; }
+.btn-round .off { display: none; }
+.btn-round[aria-pressed="true"] .on { display: none; }
+.btn-round[aria-pressed="true"] .off { display: block; }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
+  outline: 3.5px solid var(--accent-soft);
+  outline-offset: 0.5px;
+  border-radius: 999px;
 }
+.picker:focus-visible { border-radius: 10px; }
 
-/* Native select */
-
-.select {
-  width: 100%;
-  font: inherit;
-  color: var(--text);
-  background-color: var(--control);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  padding: 5px 8px;
-  min-height: 30px;
-  cursor: pointer;
-}
-.select:hover { background-color: var(--control-hover); }
-
-/* Switch */
+/* Switch, macOS 26/27: a pill knob that stretches while it is held. */
 
 .check {
   display: inline-flex;
   align-items: center;
   gap: 10px;
   white-space: nowrap;
-  cursor: pointer;
+  cursor: default;
 }
 
 .switch {
   appearance: none;
   flex: none;
   position: relative;
-  width: 36px;
-  height: 20px;
+  width: 38px;
+  height: 22px;
   margin: 0;
-  border-radius: 20px;
-  background: var(--line-strong);
-  cursor: pointer;
-  transition: background-color 200ms var(--ease);
+  border-radius: 22px;
+  background: var(--fill-active);
+  cursor: default;
+  transition: background-color var(--t-smooth) var(--smooth);
 }
 .switch::after {
   content: "";
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
+  width: 24px;
+  height: 18px;
+  border-radius: 18px;
   background: var(--knob);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  transition: transform 200ms var(--ease);
+  box-shadow: var(--knob-shadow);
+  transition: transform var(--t-bouncy) var(--bouncy), width var(--t-snappy) var(--snappy);
 }
 .switch:checked { background: var(--accent); }
-.switch:checked::after { transform: translateX(16px); }
-.switch:hover { filter: brightness(0.96); }
-.switch:disabled,
-.switch:disabled:checked {
-  background: var(--line-strong);
-  opacity: 0.6;
-  cursor: default;
-  filter: none;
-}
-.switch:focus-visible { border-radius: 20px; }
+.switch:checked::after { transform: translateX(10px); }
+.switch:active::after { width: 28px; }
+.switch:checked:active::after { transform: translateX(6px); }
+.switch:disabled { opacity: 0.5; cursor: default; }
+.switch:focus-visible { border-radius: 22px; }
 
-/* Volume slider */
+/* Volume: Control Center's thick capsule. The fill is the volume, the
+   speaker glyph rides at its start, the live level runs underneath. */
+
+.fader-stack {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.capsule {
+  position: relative;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+  transition: transform var(--t-snappy) var(--snappy);
+}
+/* Held, the capsule swells a little, as Control Center's does. */
+.capsule:has(.fader:active) { transform: scale(1.025); }
+.capsule .glyph {
+  position: absolute;
+  left: 9px;
+  top: 7px;
+  color: var(--glyph-on-level);
+  pointer-events: none;
+  z-index: 2;
+  transition: color var(--t-fast) ease;
+}
+.capsule .fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: max(28px, var(--fill, 100%));
+  background: var(--level);
+  border-radius: 999px;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.12);
+  pointer-events: none;
+}
 
 .fader {
   appearance: none;
+  position: absolute;
+  inset: 0;
   width: 100%;
-  min-width: 0;
-  height: 18px;
+  height: 100%;
   margin: 0;
   background: transparent;
-  cursor: pointer;
-  --fill: 100%;
-  --fill-color: var(--accent);
+  cursor: default;
+  z-index: 3;
 }
-.fader::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 4px;
-  background: linear-gradient(to right, var(--fill-color) var(--fill), var(--line-strong) var(--fill));
-}
-.fader::-webkit-slider-thumb {
-  appearance: none;
-  width: 18px;
-  height: 18px;
-  margin-top: -7px;
-  border-radius: 50%;
-  background: var(--knob);
-  border: 1px solid var(--line-strong);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  transition: transform 150ms var(--ease);
-}
-.fader:hover::-webkit-slider-thumb { transform: scale(1.08); }
-.fader:active::-webkit-slider-thumb { transform: scale(0.96); }
-.fader::-moz-range-track { height: 4px; border-radius: 4px; background: var(--line-strong); }
-.fader::-moz-range-progress { height: 4px; border-radius: 4px; background: var(--fill-color); }
-.fader::-moz-range-thumb {
-  width: 18px; height: 18px; border-radius: 50%;
-  background: var(--knob); border: 1px solid var(--line-strong);
-}
-.fader:focus-visible { border-radius: 10px; }
+.fader::-webkit-slider-runnable-track { height: 28px; background: transparent; }
+.fader::-webkit-slider-thumb { appearance: none; width: 28px; height: 28px; background: transparent; border: 0; }
+.fader::-moz-range-track { height: 28px; background: transparent; }
+.fader::-moz-range-thumb { width: 28px; height: 28px; background: transparent; border: 0; }
+.fader:focus-visible { outline: none; }
+.capsule:has(.fader:focus-visible) { outline: 3.5px solid var(--accent-soft); outline-offset: 0.5px; }
 
 .db {
   flex: none;
-  width: 8ch;
+  width: 7.5ch;
   text-align: right;
   color: var(--text-2);
 }
 
-/* Level meter: one thin neutral bar, no segments, no colors */
+/* Level meter: a thin capsule, live */
 
 .meter {
   position: relative;
   flex: 1;
-  height: 2px;
-  border-radius: 2px;
-  background: var(--surface-sunken);
+  height: 4px;
+  border-radius: 4px;
+  background: var(--track);
   overflow: hidden;
 }
 .meter span {
   position: absolute;
   inset: 0;
+  border-radius: 4px;
   background: var(--meter);
   transform-origin: left center;
   transform: scaleX(0);
   will-change: transform;
 }
+.output-meter { margin: 0 14px; height: 3px; }
 
-/* Output rows */
+/* Output platters */
 
 .output {
   display: grid;
-  gap: 8px;
-  padding: 12px 14px;
+  gap: 10px;
+  padding: 12px 12px 12px 14px;
 }
 
 .output-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 10px;
   min-width: 0;
+  min-height: 20px;
 }
 
 .output-name {
   flex: 1;
   min-width: 0;
+  font-weight: var(--w-semibold);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: pointer;
 }
+.output-name[hidden] { display: none; }
+
+.output-rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-weight: var(--w-semibold);
+  letter-spacing: inherit;
+  color: var(--text);
+  background: var(--fill);
+  border: 0;
+  border-radius: 7px;
+  padding: 3px 7px;
+  margin: -4px -7px;
+  box-shadow: 0 0 0 3.5px var(--accent-soft), inset 0 0 0 1px var(--accent);
+  user-select: text;
+}
+.output-rename { cursor: text; }
+.output-rename:focus-visible { outline: none; }
+.output-rename[hidden] { display: none; }
+
+.output-suffix {
+  flex: none;
+  max-width: 45%;
+  margin-left: 6px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.output-suffix[hidden] { display: none; }
 
 .output-state {
   flex: none;
+  font-size: 12px;
+  letter-spacing: var(--track-12);
   color: var(--text-2);
 }
 .output-state[data-tone="error"] { color: var(--danger); }
-.output-state[data-tone="on"] { color: var(--text); }
 
-.output-controls {
+.output-controls,
+.output-edit {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding-left: 46px;
+  gap: 8px;
 }
+.output-edit { display: none; }
+[data-editing="true"] .output-controls { display: none; }
+[data-editing="true"] .output-edit { display: flex; }
+.output-edit .btn[hidden] { display: none; }
+.output-edit .output-remove { color: var(--danger); }
 
-.fader-stack {
-  flex: 1;
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-  padding-top: 5px;
-}
-.output-meter { margin: 0 9px; }
-
-.output-detail {
-  padding-left: 46px;
-  color: var(--text-3);
-}
+.output-detail { color: var(--text-2); font-size: 12px; letter-spacing: var(--track-12); }
 .output-detail:empty { display: none; }
 
-.output[data-enabled="false"] .output-controls { display: none; }
-
-.output[data-muted="true"] .fader { --fill-color: var(--text-3); }
-.output[data-muted="true"] .output-meter { opacity: 0.35; }
+.output[data-muted="true"] .capsule .fill { background: var(--fill-active); box-shadow: none; }
+.output[data-muted="true"] .capsule .glyph { color: var(--text-3); }
+.output[data-muted="true"] .output-meter span { opacity: 0.3; }
 .output[data-muted="true"] .output-db { color: var(--text-3); }
 
+/* Devices that are not playing, folded in one platter */
+
+.others { overflow: hidden; }
+.others[hidden] { display: none; }
+
+.disclosure {
+  appearance: none;
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: default;
+  justify-content: space-between;
+  transition: background-color var(--t-fast) ease;
+}
+.disclosure:active { background: var(--fill); }
+.disclosure:focus-visible { outline-offset: -3.5px; border-radius: var(--radius-platter); }
+.disclosure-label { font-weight: var(--w-medium); }
+.disclosure-action { color: var(--accent); font-weight: var(--w-medium); }
+
+#others[hidden] { display: none; }
+#others > .row {
+  box-shadow: inset 0 0.5px 0 var(--hairline);
+  margin: 0 0 0 14px;
+  padding-left: 0;
+}
+#others.unfolding > .row { animation: unfold var(--t-smooth) var(--smooth) both; }
+#others.unfolding > .row:nth-child(2) { animation-delay: 25ms; }
+#others.unfolding > .row:nth-child(n + 3) { animation-delay: 50ms; }
+@keyframes unfold { from { opacity: 0; transform: translateY(-6px); } }
+
+.other-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.other-add { color: var(--accent); }
+
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition: none !important; }
+  *, *::before, *::after { transition: none !important; animation: none !important; }
 }
 
 /* Startup update splash (splash.html) */
@@ -446,17 +740,17 @@ main {
   flex-direction: column;
   justify-content: center;
   gap: 6px;
-  padding: 0 20px;
+  padding: 0 22px;
+  background: var(--tint-solid);
 }
 .splash h1 {
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font: var(--w-semibold) 17px/1.2 var(--font-display);
+  letter-spacing: var(--track-17);
 }
 .splash-state { color: var(--text-2); }
 .splash-meter {
   flex: none;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 .splash-meter span {
   background: var(--accent);

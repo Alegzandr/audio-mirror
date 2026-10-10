@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod config;
+mod glass;
 mod i18n;
 #[cfg(windows)]
 mod install;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use audio::{DeviceList, Engine, Status};
@@ -51,8 +52,14 @@ impl AppState {
             let value = f(&mut cfg);
             (cfg.clone(), value)
         };
-        cfg.save(&self.path).map_err(|e| e.to_string())?;
+        // The change is already in memory, so it reaches the engine even when
+        // the file cannot be written: otherwise the panel would show a mute
+        // or an output the audio never got. The next change saves it again.
+        let saved = cfg.save(&self.path);
         apply(&cfg, value);
+        if let Err(e) = saved {
+            log::error!("settings not saved: {e}");
+        }
         Ok(())
     }
 
@@ -91,8 +98,20 @@ fn status(state: State<'_, AppState>) -> Status {
     state.engine.status()
 }
 
+/// Longest id or name a command accepts. Device ids are far shorter; the
+/// bound keeps a misbehaving page from growing the settings file without end.
+const MAX_ARG_LEN: usize = 1024;
+
+fn check_len(args: &[&str]) -> Result<(), String> {
+    if args.iter().any(|a| a.len() > MAX_ARG_LEN) {
+        return Err("argument too long".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn set_source(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    check_len(&[&id])?;
     state.update(|c| c.source = id)
 }
 
@@ -103,6 +122,7 @@ fn set_output_enabled(
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
+    check_len(&[&id, &name])?;
     state.update(|c| c.output_mut(&id, &name).enabled = enabled)
 }
 
@@ -114,6 +134,7 @@ fn set_output_volume(
     fader: f32,
     persist: bool,
 ) -> Result<(), String> {
+    check_len(&[&id, &name])?;
     let fader = if fader.is_finite() {
         fader.clamp(0.0, 1.0)
     } else {
@@ -140,10 +161,79 @@ fn set_output_muted(
     name: String,
     muted: bool,
 ) -> Result<(), String> {
+    check_len(&[&id, &name])?;
     state.change(
         |c| c.output_mut(&id, &name).muted = muted,
         |_, ()| state.engine.set_muted(&id, muted),
     )
+}
+
+/// One line of the source menu: a source, or a group header when `id` is None.
+#[derive(serde::Deserialize)]
+struct MenuEntry {
+    id: Option<String>,
+    label: String,
+    checked: bool,
+}
+
+/// Menu ids of the source menu carry this prefix before the source id.
+const SOURCE_MENU_PREFIX: &str = "source:";
+
+/// Shows the source list as a native menu over the pop-up button, at `x`,
+/// `y` in the panel (logical pixels). The panel only asks for it on macOS,
+/// where the native menu is the one the look is drawn after; the choice
+/// comes back as a `source-picked` event, handled like the page's own menu.
+#[tauri::command]
+fn source_menu(
+    window: tauri::WebviewWindow,
+    entries: Vec<MenuEntry>,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    use tauri::menu::{CheckMenuItem, Menu, MenuItem};
+    let app = window.app_handle();
+    let menu = Menu::new(app).map_err(|e| e.to_string())?;
+    for (i, entry) in entries.iter().enumerate() {
+        let added = match &entry.id {
+            Some(id) => {
+                let item = CheckMenuItem::with_id(
+                    app,
+                    format!("{SOURCE_MENU_PREFIX}{id}"),
+                    &entry.label,
+                    true,
+                    entry.checked,
+                    None::<&str>,
+                )
+                .map_err(|e| e.to_string())?;
+                menu.append(&item)
+            }
+            None => {
+                let item = MenuItem::with_id(
+                    app,
+                    format!("header:{i}"),
+                    &entry.label,
+                    false,
+                    None::<&str>,
+                )
+                .map_err(|e| e.to_string())?;
+                menu.append(&item)
+            }
+        };
+        added.map_err(|e| e.to_string())?;
+    }
+    window
+        .popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())
+}
+
+/// Renames the output in the system; the panel re-reads the devices after.
+#[tauri::command]
+async fn rename_output(id: String, description: String) -> Result<(), String> {
+    check_len(&[&id, &description])?;
+    tauri::async_runtime::spawn_blocking(move || audio::rename_output(&id, &description))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -187,6 +277,17 @@ pub(crate) fn start(app: &AppHandle) {
         let _ = launcher.enable();
     }
 
+    if let Some(panel) = app.get_webview_window(tray::PANEL) {
+        glass::apply(&panel);
+        // A source picked in the native menu goes back to the page, which
+        // applies it the way its own menu does.
+        let target = panel.clone();
+        panel.on_menu_event(move |_, event| {
+            if let Some(id) = event.id().as_ref().strip_prefix(SOURCE_MENU_PREFIX) {
+                let _ = target.emit("source-picked", id);
+            }
+        });
+    }
     if let Err(e) = tray::setup(app) {
         log::error!("tray: {e}");
     }
@@ -228,6 +329,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(logging())
         .plugin(i18n::plugin(lang))
+        .plugin(glass::plugin())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             // During the startup update check, the splash is already showing.
             if app.get_webview_window(updater::SPLASH).is_none() {
@@ -271,6 +373,8 @@ pub fn run() {
             set_output_enabled,
             set_output_volume,
             set_output_muted,
+            rename_output,
+            source_menu,
             set_autostart,
             hide_panel,
             restart,

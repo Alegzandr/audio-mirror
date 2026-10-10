@@ -17,22 +17,29 @@ use std::thread::JoinHandle;
 
 use parking_lot::Mutex;
 use windows::core::{implement, Interface, HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Devices::FunctionDiscovery::{
+    PKEY_Device_DeviceDesc, PKEY_Device_FriendlyName,
+};
+use windows::Win32::Foundation::{
+    CloseHandle, E_OUTOFMEMORY, HANDLE, PROPERTYKEY, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, eRender, EDataFlow, ERole, IAudioCaptureClient, IAudioClient, IAudioClock,
-    IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
+    IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, IMMEndpoint, IMMNotificationClient,
     IMMNotificationClient_Impl, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
     DEVICE_STATE, DEVICE_STATE_ACTIVE, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CoTaskMemFree, CLSCTX_ALL,
+    COINIT_MULTITHREADED, STGM_READ, STGM_READWRITE,
 };
 use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, ResetEvent,
     SetEvent, WaitForMultipleObjects, INFINITE,
 };
+use windows::Win32::System::Variant::VT_LPWSTR;
 
 use super::drift::DriftControl;
 use super::format::{
@@ -154,14 +161,70 @@ fn device_id(device: &IMMDevice) -> Option<String> {
     unsafe { device.GetId() }.ok().map(take_pwstr)
 }
 
-fn device_name(device: &IMMDevice) -> String {
+fn device_property(device: &IMMDevice, key: &PROPERTYKEY) -> String {
     // SAFETY: COM calls on a valid device.
     unsafe {
         device
             .OpenPropertyStore(STGM_READ)
-            .and_then(|store| store.GetValue(&PKEY_Device_FriendlyName as *const PROPERTYKEY))
+            .and_then(|store| store.GetValue(key as *const PROPERTYKEY))
             .map(|v| v.to_string())
             .unwrap_or_default()
+    }
+}
+
+fn device_name(device: &IMMDevice) -> String {
+    device_property(device, &PKEY_Device_FriendlyName)
+}
+
+/// Renames an output the way Sound settings does: the system writes the
+/// friendly name as "<description> (<adapter>)", so only the description
+/// is the user's ("Speakers" in "Speakers (Realtek Audio)"). Every
+/// application, OBS included, then shows the new name.
+pub fn rename_output(id: &str, description: &str) -> Result<(), Message> {
+    let en = enumerator().map_err(|e| msg::WASAPI_ENUMERATOR.detail(e.message()))?;
+    let value = lpwstr_variant(description).map_err(|e| msg::SYSTEM.detail(e.message()))?;
+    // SAFETY: COM calls on valid objects.
+    unsafe {
+        let device = en
+            .GetDevice(&HSTRING::from(id))
+            .map_err(|e| msg::WASAPI_GET_DEVICE.detail(e.message()))?;
+        // An id is any endpoint, microphones included: only outputs are
+        // the panel's to rename.
+        let flow = device
+            .cast::<IMMEndpoint>()
+            .and_then(|e| e.GetDataFlow())
+            .map_err(|e| msg::SYSTEM.detail(e.message()))?;
+        if flow != eRender {
+            return Err(msg::SYSTEM.detail("not an output device"));
+        }
+        let store = device
+            .OpenPropertyStore(STGM_READWRITE)
+            .map_err(|e| msg::SYSTEM.detail(e.message()))?;
+        store
+            .SetValue(&PKEY_Device_DeviceDesc as *const PROPERTYKEY, &value)
+            .and_then(|()| store.Commit())
+            .map_err(|e| msg::SYSTEM.detail(e.message()))
+    }
+}
+
+/// `InitPropVariantFromString`: a `VT_LPWSTR`, the type Windows keeps device
+/// names in. `PROPVARIANT::from(&str)` would make a `VT_BSTR`, which other
+/// readers of the store do not expect.
+fn lpwstr_variant(s: &str) -> windows::core::Result<PROPVARIANT> {
+    let wide: Vec<u16> = s.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: the string is copied into COM memory that `PropVariantClear`
+    // (the `PROPVARIANT` drop) frees with `CoTaskMemFree`.
+    unsafe {
+        let p = CoTaskMemAlloc(wide.len() * size_of::<u16>()).cast::<u16>();
+        if p.is_null() {
+            return Err(E_OUTOFMEMORY.into());
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+        let mut value = PROPVARIANT::default();
+        let inner = &mut value.Anonymous.Anonymous;
+        inner.vt = VT_LPWSTR;
+        inner.Anonymous.pwszVal = PWSTR(p);
+        Ok(value)
     }
 }
 
@@ -173,7 +236,7 @@ fn default_output_id() -> Option<String> {
     device_id(&device)
 }
 
-fn list_devices(en: &IMMDeviceEnumerator, flow: EDataFlow) -> Vec<(String, String)> {
+fn list_devices(en: &IMMDeviceEnumerator, flow: EDataFlow) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     // SAFETY: COM calls on valid objects.
     unsafe {
@@ -186,7 +249,11 @@ fn list_devices(en: &IMMDeviceEnumerator, flow: EDataFlow) -> Vec<(String, Strin
                 continue;
             };
             if let Some(id) = device_id(&device) {
-                out.push((id, device_name(&device)));
+                out.push((
+                    id,
+                    device_name(&device),
+                    device_property(&device, &PKEY_Device_DeviceDesc),
+                ));
             }
         }
     }
@@ -210,7 +277,7 @@ pub fn enumerate() -> Result<DeviceList, Message> {
         captures_output: default_out.clone(),
     });
 
-    for (id, name) in list_devices(&en, eRender) {
+    for (id, name, description) in list_devices(&en, eRender) {
         let is_default = default_out.as_deref() == Some(id.as_str());
         list.sources.push(SourceInfo {
             id: format!("{OUTPUT_PREFIX}{id}"),
@@ -223,9 +290,10 @@ pub fn enumerate() -> Result<DeviceList, Message> {
             id,
             name,
             is_default,
+            description: Some(description).filter(|d| !d.is_empty()),
         });
     }
-    for (id, name) in list_devices(&en, eCapture) {
+    for (id, name, _) in list_devices(&en, eCapture) {
         list.sources.push(SourceInfo {
             is_default: default_in.as_deref() == Some(id.as_str()),
             id: format!("{INPUT_PREFIX}{id}"),
@@ -826,7 +894,13 @@ fn write_packet(
         audio.planes[0].as_ptr() as *const u8,
         audio.planes[1].as_ptr() as *const u8,
     ];
-    let Some(frames) = client.resampler.resample(&input, audio.frames) else {
+    // Nothing to write: `GetBuffer(0)` leaves the pointer null, and even an
+    // empty copy needs a valid one.
+    let Some(frames) = client
+        .resampler
+        .resample(&input, audio.frames)
+        .filter(|&f| f > 0)
+    else {
         return Ok(());
     };
 

@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "panel",
+  "description": "Tray panel: its own commands and the update-ready event, nothing else",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-snapshot",
+    "allow-status",
+    "allow-set-source",
+    "allow-set-output-enabled",
+    "allow-set-output-volume",
+    "allow-set-output-muted",
+    "allow-rename-output",
+    "allow-source-menu",
+    "allow-set-autostart",
+    "allow-hide-panel",
+    "allow-restart",
+    "allow-quit"
+  ]
+}

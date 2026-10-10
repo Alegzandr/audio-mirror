@@ -38,7 +38,7 @@ A tray icon. Left click unfolds a small panel above the taskbar (like OneDrive),
 
 ## Brand Commitments
 
-Name: Audio Mirror. Owner constraints: no subtitles, no Inter font, no Lucide or custom-drawn icons, no decorative color spots, no LED-style indicators, no em dash, no hover effect on anything that is not clickable, no heavy gradients, no neon purple style.
+Name: Audio Mirror. Visual standard: native macOS 27 ("Golden Gate"), the panel drawn as a Control Center module in Liquid Glass, chosen by the owner over any custom visual world; DESIGN.md holds the details. Owner constraints: no em dash in copy, no hover effect on anything that is not clickable, every state still written as text.
 
 ## Evidence on Hand
 

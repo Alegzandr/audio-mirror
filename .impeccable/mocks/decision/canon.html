@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Audio Mirror, standard Windows 11</title>
+<style>
+  :root { --mica: #202020; --tile: rgba(255,255,255,0.06); --tile-line: rgba(255,255,255,0.08); --ink: #fff; --ink2: rgba(255,255,255,0.72); --accent: #60cdff; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 380px; height: 560px; overflow: hidden; }
+  body { font: 14px/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color: var(--ink);
+    background: radial-gradient(120% 80% at 10% 0%, #2b2f3a 0%, transparent 60%), radial-gradient(100% 70% at 100% 100%, #2a2521 0%, transparent 60%), var(--mica);
+    padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .head { display: flex; justify-content: space-between; align-items: baseline; padding: 2px 4px 6px; }
+  h1 { font: 600 20px/1.2 "Segoe UI Variable Display", "Segoe UI", sans-serif; }
+  .head span { color: var(--ink2); font-size: 13px; }
+  .tile { background: var(--tile); border: 1px solid var(--tile-line); border-radius: 8px; padding: 12px 14px; }
+  .label { font-size: 12px; color: var(--ink2); }
+  .sel { display: flex; justify-content: space-between; align-items: center; margin-top: 2px; font-weight: 600; }
+  .sel span { color: var(--ink2); font-weight: 400; font-size: 12px; }
+  .lvl { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.12); margin-top: 10px; } .lvl b { display: block; height: 100%; width: 72%; border-radius: 2px; background: rgba(255,255,255,0.55); }
+  .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .name { font-weight: 600; }
+  .state { font-size: 12px; color: var(--ink2); }
+  .ctl { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .slider { flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.3); position: relative; }
+  .slider b { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--accent); }
+  .slider u { position: absolute; top: -8px; width: 20px; height: 20px; margin-left: -10px; border-radius: 50%; background: #454545; border: 1px solid rgba(255,255,255,0.1); box-shadow: inset 0 0 0 5px #454545, inset 0 0 0 20px var(--accent); }
+  .db { width: 48px; text-align: right; font-size: 13px; color: var(--ink2); }
+  .btn { font: inherit; font-size: 13px; color: var(--ink); background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 4px 12px; }
+  .btn.on { background: var(--accent); color: #003049; border-color: transparent; }
+  .err .state { color: #ff99a4; }
+  .more { display: flex; justify-content: space-between; align-items: center; }
+  .foot { margin-top: auto; display: flex; justify-content: space-between; align-items: center; color: var(--ink2); font-size: 13px; padding: 0 4px; }
+</style>
+</head>
+<body>
+  <div class="head"><h1>Audio Mirror</h1><span>2 sur 3 en lecture</span></div>
+  <div class="tile"><div class="label">Source</div><div class="sel">Sortie par défaut (Speakers) <span>Changer</span></div><div class="lvl"><b></b></div></div>
+  <div class="tile">
+    <div class="top"><span class="name">Headphones (USB Audio)</span><span class="state">En lecture</span></div>
+    <div class="ctl"><div class="slider"><b style="width:76%"></b><u style="left:76%"></u></div><span class="db">−4,0 dB</span><button class="btn">Couper</button></div>
+  </div>
+  <div class="tile">
+    <div class="top"><span class="name">CABLE Input (VB-Audio)</span><span class="state">En lecture</span></div>
+    <div class="ctl"><div class="slider"><b style="width:96%"></b><u style="left:96%"></u></div><span class="db">0,0 dB</span><button class="btn">Couper</button></div>
+  </div>
+  <div class="tile err">
+    <div class="top"><span class="name">LG ULTRAGEAR (NVIDIA)</span><span class="state">Indisponible</span></div>
+    <div class="ctl"><div class="slider" style="opacity:.4"><b style="width:56%"></b><u style="left:56%"></u></div><span class="db">−12,6 dB</span><button class="btn on">Son coupé</button></div>
+  </div>
+  <div class="tile more"><span>2 autres périphériques</span><span class="state">Afficher</span></div>
+  <div class="foot"><span>Lancer au démarrage</span><span>v0.3.4 · Quitter</span></div>
+</body>
+</html>
