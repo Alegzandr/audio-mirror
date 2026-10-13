@@ -17,14 +17,21 @@
 //!   reached when a device stalls.
 //!
 //! Each side owns its threaded mainloop and context, like the two OBS
-//! wrappers (`pulse-wrapper.c` and `pulseaudio-wrapper.c`).
+//! wrappers (`pulse-wrapper.c` and `pulseaudio-wrapper.c`). One more
+//! deviation: OBS connects its contexts once, so a sound server that
+//! restarts (or is not up yet when the app autostarts) leaves them failed
+//! until OBS is relaunched. Here a context that is no longer good is
+//! replaced on the next request, captures and monitors keep the loop their
+//! stream was made on, and the watcher reconnects on its own thread.
 
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use libpulse_sys::*;
 use parking_lot::Mutex;
@@ -54,68 +61,141 @@ const STARTUP_TIMEOUT_NS: u64 = 500_000_000;
 /// what the source produces (two clocks apart, or a device gone to sleep),
 /// and keeping the audio would only raise the latency for good.
 const MAX_BACKLOG_USEC: u64 = 400_000;
+/// How often the watcher checks its connection, and retries a lost one:
+/// the retry delay of the supervisor.
+const WATCH_RETRY: Duration = Duration::from_secs(3);
 
 pub fn init_thread() {}
 
 /// Follows the default sink, which OBS resolves only once: the desktop
 /// capture is reopened on the new sink's monitor, like `win-wasapi` does.
+///
+/// The subscription lives on its own thread, which connects again when the
+/// server goes away or was not up yet, and then reports the devices as
+/// changed so the supervisor retries what failed in the meantime.
 pub fn watch_system(
     callback: Box<dyn Fn(SystemEvent) + Send + Sync>,
 ) -> Option<Box<dyn std::any::Any + Send + Sync>> {
-    let pulse = PulseLoop::new(c"Audio Mirror Watcher");
-    let default_sink = pulse.server_info().map(|d| d.default_sink);
-    let data = Box::new(WatchData {
+    let data = Arc::new(WatchData {
         callback,
-        default_sink: Mutex::new(default_sink.clone().unwrap_or_default()),
+        default_sink: Mutex::new(None),
     });
-    let watcher = Watcher { pulse, data };
-    default_sink?;
+    let (stop, stopped) = mpsc::channel();
+    let thread = std::thread::Builder::new()
+        .name("pulse-watcher".into())
+        .spawn(move || watch_loop(&data, &stopped))
+        .map_err(|e| log::error!("failed to start the PulseAudio watcher: {e}"))
+        .ok()?;
+    Some(Box::new(Watcher {
+        stop: Some(stop),
+        thread: Some(thread),
+    }))
+}
 
-    let userdata = &*watcher.data as *const WatchData as *mut c_void;
-    let guard = watcher.pulse.lock();
-    // SAFETY: context used under the lock; `data` outlives the subscription,
-    // which `Watcher::drop` removes first.
-    unsafe {
-        let context = watcher.pulse.context;
-        pa_context_set_subscribe_callback(context, Some(watch_event), userdata);
-        let op = pa_context_subscribe(
-            context,
-            PA_SUBSCRIPTION_MASK_SERVER | PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE,
-            None,
-            ptr::null_mut(),
-        );
-        if !op.is_null() {
-            pa_operation_unref(op);
+/// Waits one retry delay. True when the watcher was dropped meanwhile.
+fn watch_stopped(stopped: &mpsc::Receiver<()>) -> bool {
+    !matches!(
+        stopped.recv_timeout(WATCH_RETRY),
+        Err(RecvTimeoutError::Timeout)
+    )
+}
+
+fn watch_loop(data: &Arc<WatchData>, stopped: &mpsc::Receiver<()>) {
+    let mut lost = false;
+    loop {
+        if let Some(subscription) = Subscription::new(data) {
+            if lost {
+                log::info!("PulseAudio watcher connected again");
+                (data.callback)(SystemEvent::DevicesChanged);
+            }
+            while subscription.pulse.is_good() {
+                if watch_stopped(stopped) {
+                    return;
+                }
+            }
+            log::warn!("PulseAudio watcher lost its connection");
+        }
+        lost = true;
+        if watch_stopped(stopped) {
+            return;
         }
     }
-    drop(guard);
-    Some(Box::new(watcher))
 }
 
 struct WatchData {
     callback: Box<dyn Fn(SystemEvent) + Send + Sync>,
-    default_sink: Mutex<String>,
+    /// `None` until the first connection.
+    default_sink: Mutex<Option<String>>,
 }
 
+impl WatchData {
+    /// Records the default sink, reporting a change from a known one.
+    fn default_sink(&self, sink: String) {
+        let previous = self.default_sink.lock().replace(sink.clone());
+        if previous.is_some_and(|p| p != sink) {
+            (self.callback)(SystemEvent::DefaultOutputChanged);
+        }
+    }
+}
+
+/// What [`watch_system`] hands back: dropping it stops the watcher thread,
+/// which unsubscribes.
 struct Watcher {
-    pulse: PulseLoop,
-    data: Box<WatchData>,
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        let (mainloop, context) = (self.pulse.mainloop, self.pulse.context);
-        // SAFETY: the loop and context are owned by this watcher only.
-        unsafe {
-            pa_threaded_mainloop_lock(mainloop);
-            pa_context_set_subscribe_callback(context, None, ptr::null_mut());
-            pa_context_set_state_callback(context, None, ptr::null_mut());
-            pa_context_disconnect(context);
-            pa_context_unref(context);
-            pa_threaded_mainloop_unlock(mainloop);
-            pa_threaded_mainloop_stop(mainloop);
-            pa_threaded_mainloop_free(mainloop);
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
+    }
+}
+
+/// One connection of the watcher, subscribed to server, sink and source
+/// events.
+struct Subscription {
+    pulse: PulseLoop,
+}
+
+impl Subscription {
+    /// `data` outlives the subscription: the watcher thread holds it.
+    fn new(data: &Arc<WatchData>) -> Option<Subscription> {
+        let pulse = PulseLoop::new(c"Audio Mirror Watcher");
+        let defaults = pulse.server_info()?;
+        data.default_sink(defaults.default_sink);
+
+        let userdata = Arc::as_ptr(data) as *mut c_void;
+        let guard = pulse.lock();
+        // SAFETY: context used under the lock; `data` outlives the
+        // subscription, whose callback `Subscription::drop` removes first.
+        unsafe {
+            let context = pulse.context;
+            pa_context_set_subscribe_callback(context, Some(watch_event), userdata);
+            let op = pa_context_subscribe(
+                context,
+                PA_SUBSCRIPTION_MASK_SERVER
+                    | PA_SUBSCRIPTION_MASK_SINK
+                    | PA_SUBSCRIPTION_MASK_SOURCE,
+                None,
+                ptr::null_mut(),
+            );
+            if !op.is_null() {
+                pa_operation_unref(op);
+            }
+        }
+        drop(guard);
+        Some(Subscription { pulse })
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let _g = self.pulse.lock();
+        // SAFETY: context used under the lock, then released by `PulseLoop`.
+        unsafe { pa_context_set_subscribe_callback(self.pulse.context, None, ptr::null_mut()) };
     }
 }
 
@@ -163,13 +243,7 @@ extern "C" fn watch_server_info(
             cstr((*i).default_sink_name),
         )
     };
-    let changed = {
-        let mut current = data.default_sink.lock();
-        std::mem::replace(&mut *current, sink.clone()) != sink
-    };
-    if changed {
-        (data.callback)(SystemEvent::DefaultOutputChanged);
-    }
+    data.default_sink(sink);
 }
 
 fn os_gettime_ns() -> u64 {
@@ -193,6 +267,14 @@ fn cstr(p: *const c_char) -> String {
 struct PulseLoop {
     mainloop: *mut pa_threaded_mainloop,
     context: *mut pa_context,
+    /// Held around every wait on the loop, so one request at a time is in
+    /// flight on this context. `pa_threaded_mainloop_signal` wakes every
+    /// waiter and each one rechecks its own condition, so this does not
+    /// fix a lost wakeup, it makes sure there can be none: the enumeration
+    /// (a blocking task of the panel) and the supervisor share the capture
+    /// loop. Never taken on the loop thread, and never while holding the
+    /// mainloop lock, so callbacks cannot deadlock on it.
+    requests: Mutex<()>,
 }
 
 // SAFETY: every use goes through the threaded mainloop lock, as in OBS.
@@ -249,8 +331,21 @@ impl PulseLoop {
             pa_proplist_free(props);
             pa_threaded_mainloop_unlock(mainloop);
 
-            PulseLoop { mainloop, context }
+            PulseLoop {
+                mainloop,
+                context,
+                requests: Mutex::new(()),
+            }
         }
+    }
+
+    /// False once the context failed or was terminated, which it never
+    /// comes back from: the server went away, or was not there to begin
+    /// with.
+    fn is_good(&self) -> bool {
+        let _g = self.lock();
+        // SAFETY: context used under the lock.
+        unsafe { pa_context_is_good(pa_context_get_state(self.context)) }
     }
 
     fn lock(&self) -> LoopGuard<'_> {
@@ -271,6 +366,12 @@ impl PulseLoop {
 
     /// `pulse_context_ready`.
     fn context_ready(&self) -> bool {
+        let _r = self.requests.lock();
+        self.wait_ready()
+    }
+
+    /// [`Self::context_ready`] for a caller that holds `requests`.
+    fn wait_ready(&self) -> bool {
         let _g = self.lock();
         // SAFETY: context used under the lock.
         unsafe {
@@ -289,7 +390,8 @@ impl PulseLoop {
 
     /// Runs an operation to completion, like the `pulse_get_*` helpers.
     fn run(&self, start: impl FnOnce(*mut pa_context) -> *mut pa_operation) -> bool {
-        if !self.context_ready() {
+        let _r = self.requests.lock();
+        if !self.wait_ready() {
             return false;
         }
         let _g = self.lock();
@@ -397,7 +499,8 @@ impl PulseLoop {
         spec: &pa_sample_spec,
         map: &pa_channel_map,
     ) -> *mut pa_stream {
-        if !self.context_ready() {
+        let _r = self.requests.lock();
+        if !self.wait_ready() {
             return ptr::null_mut();
         }
         let _g = self.lock();
@@ -411,16 +514,48 @@ impl PulseLoop {
     }
 }
 
+impl Drop for PulseLoop {
+    /// `pulse_unref` / `pulseaudio_unref`, once the last stream made on
+    /// this loop is gone.
+    fn drop(&mut self) {
+        // SAFETY: nothing else holds the loop any more.
+        unsafe {
+            pa_threaded_mainloop_lock(self.mainloop);
+            pa_context_set_state_callback(self.context, None, ptr::null_mut());
+            pa_context_disconnect(self.context);
+            pa_context_unref(self.context);
+            pa_threaded_mainloop_unlock(self.mainloop);
+            pa_threaded_mainloop_stop(self.mainloop);
+            pa_threaded_mainloop_free(self.mainloop);
+        }
+    }
+}
+
+/// The loop in `slot`, replaced by a new connection when its context is
+/// no longer good. The streams of the old one keep it until they close.
+fn shared_loop(slot: &Mutex<Option<Arc<PulseLoop>>>, name: &CStr) -> Arc<PulseLoop> {
+    let mut slot = slot.lock();
+    if let Some(pulse) = slot.as_ref().filter(|p| p.is_good()) {
+        return pulse.clone();
+    }
+    if slot.take().is_some() {
+        log::warn!("PulseAudio connection lost, connecting again");
+    }
+    let pulse = Arc::new(PulseLoop::new(name));
+    *slot = Some(pulse.clone());
+    pulse
+}
+
 /// Capture side, `pulse-wrapper.c`.
-fn capture_loop() -> &'static PulseLoop {
-    static LOOP: OnceLock<PulseLoop> = OnceLock::new();
-    LOOP.get_or_init(|| PulseLoop::new(c"Audio Mirror"))
+fn capture_loop() -> Arc<PulseLoop> {
+    static LOOP: Mutex<Option<Arc<PulseLoop>>> = Mutex::new(None);
+    shared_loop(&LOOP, c"Audio Mirror")
 }
 
 /// Monitoring side, `pulseaudio-wrapper.c`.
-fn monitor_loop() -> &'static PulseLoop {
-    static LOOP: OnceLock<PulseLoop> = OnceLock::new();
-    LOOP.get_or_init(|| PulseLoop::new(c"Audio Mirror Monitor"))
+fn monitor_loop() -> Arc<PulseLoop> {
+    static LOOP: Mutex<Option<Arc<PulseLoop>>> = Mutex::new(None);
+    shared_loop(&LOOP, c"Audio Mirror Monitor")
 }
 
 struct CallbackData<'a, T> {
@@ -697,6 +832,8 @@ fn devices_match(source_name: &str, sink: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 struct CaptureData {
+    /// The loop the stream was made on.
+    pulse: Arc<PulseLoop>,
     hub: Arc<SourceHub>,
     stream: *mut pa_stream,
     spec: AudioSpec,
@@ -722,7 +859,7 @@ extern "C" fn stream_read(_p: *mut pa_stream, _nbytes: usize, userdata: *mut c_v
     unsafe {
         let data = &*(userdata as *const CaptureData);
         if data.stream.is_null() {
-            capture_loop().signal();
+            data.pulse.signal();
             return;
         }
 
@@ -731,13 +868,13 @@ extern "C" fn stream_read(_p: *mut pa_stream, _nbytes: usize, userdata: *mut c_v
         pa_stream_peek(data.stream, &mut frames, &mut bytes);
 
         if bytes == 0 {
-            capture_loop().signal();
+            data.pulse.signal();
             return;
         }
         if frames.is_null() {
             log::error!("Got audio hole of {bytes} bytes");
             pa_stream_drop(data.stream);
-            capture_loop().signal();
+            data.pulse.signal();
             return;
         }
 
@@ -758,7 +895,7 @@ extern "C" fn stream_read(_p: *mut pa_stream, _nbytes: usize, userdata: *mut c_v
         }
 
         pa_stream_drop(data.stream);
-        capture_loop().signal();
+        data.pulse.signal();
     }
 }
 
@@ -774,14 +911,14 @@ extern "C" fn capture_state_changed(s: *mut pa_stream, userdata: *mut c_void) {
         } else if state == PA_STREAM_FAILED || state == PA_STREAM_TERMINATED {
             *data.state.lock() = CaptureState::Failed(msg::DEVICE_DISCONNECTED.into());
         }
-        capture_loop().signal();
+        data.pulse.signal();
     }
 }
 
 /// `pulse_start_recording`.
 pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Message> {
     let pulse = capture_loop();
-    let (device, is_output) = resolve_source(source, pulse)?;
+    let (device, is_output) = resolve_source(source, &pulse)?;
     let device_c = device_name(&device)?;
     let is_default = source == DESKTOP;
 
@@ -795,6 +932,7 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
     let map = channel_map(speakers);
 
     let mut data = Box::new(CaptureData {
+        pulse: pulse.clone(),
         hub,
         stream: ptr::null_mut(),
         spec: AudioSpec {
@@ -866,15 +1004,16 @@ impl Capture for PulseCapture {
 impl Drop for PulseCapture {
     /// `pulse_stop_recording`.
     fn drop(&mut self) {
-        let pulse = capture_loop();
-        let _g = pulse.lock();
-        // SAFETY: stream owned by this capture, released under the lock.
-        unsafe {
-            let stream = self.data.stream;
-            pa_stream_set_read_callback(stream, None, ptr::null_mut());
-            pa_stream_set_state_callback(stream, None, ptr::null_mut());
-            pa_stream_disconnect(stream);
-            pa_stream_unref(stream);
+        let stream = self.data.stream;
+        {
+            let _g = self.data.pulse.lock();
+            // SAFETY: stream owned by this capture, released under the lock.
+            unsafe {
+                pa_stream_set_read_callback(stream, None, ptr::null_mut());
+                pa_stream_set_state_callback(stream, None, ptr::null_mut());
+                pa_stream_disconnect(stream);
+                pa_stream_unref(stream);
+            }
         }
         self.data.stream = ptr::null_mut();
     }
@@ -910,6 +1049,8 @@ unsafe impl Send for StreamHandle {}
 unsafe impl Sync for StreamHandle {}
 
 pub struct PulseMonitor {
+    /// The loop the stream was made on.
+    pulse: Arc<PulseLoop>,
     device: String,
     shared: Arc<OutputShared>,
     /// `playback_mutex`.
@@ -927,7 +1068,7 @@ pub fn create_monitor(
     device: &str,
     shared: Arc<OutputShared>,
 ) -> Result<MonitorInit, Message> {
-    if let Ok((source_name, true)) = resolve_source(source, capture_loop()) {
+    if let Ok((source_name, true)) = resolve_source(source, &capture_loop()) {
         if devices_match(&source_name, device) {
             return Ok(MonitorInit::Ignored);
         }
@@ -1008,6 +1149,7 @@ pub fn create_monitor(
 
     log::info!("Started Monitoring in '{device}'");
     Ok(MonitorInit::Active(Arc::new(PulseMonitor {
+        pulse,
         device: device.to_string(),
         shared,
         handle: StreamHandle(stream),
@@ -1064,8 +1206,7 @@ impl PulseMonitor {
     /// `do_stream_write`. `written` is the number of frames the capture
     /// thread just added to the backlog.
     fn stream_write(&self, written: u32) {
-        let pulse = monitor_loop();
-        let _g = pulse.lock();
+        let _g = self.pulse.lock();
         let mut guard = self.playback.lock();
         let data = &mut *guard;
 
@@ -1229,8 +1370,7 @@ impl Monitor for PulseMonitor {
     /// stay silent while the panel reported it as playing. See the retry
     /// deviation on `MONITOR_RETRY`.
     fn state(&self) -> MonitorState {
-        let pulse = monitor_loop();
-        let _g = pulse.lock();
+        let _g = self.pulse.lock();
         // SAFETY: the stream lives as long as this monitor and is read here
         // under the mainloop lock.
         let state = unsafe { pa_stream_get_state(self.handle.0) };
@@ -1247,8 +1387,8 @@ impl Monitor for PulseMonitor {
 impl Drop for PulseMonitor {
     /// `pulseaudio_stop_playback`.
     fn drop(&mut self) {
-        let pulse = monitor_loop();
         let stream = self.playback.get_mut().stream;
+        let pulse = &self.pulse;
         {
             let _g = pulse.lock();
             // SAFETY: stream owned by this monitor.

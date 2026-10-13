@@ -9,7 +9,13 @@
 //! restart. On Windows the installed `.exe` is swapped in place instead of
 //! running an installer. AppImage and `.app` bundles use the plugin's own
 //! installer.
+//!
+//! A version that downloads but fails to install (no write access to the
+//! install folder, say) is remembered, also on disk: later launches start
+//! without downloading it again, and the running app tries it again only
+//! after the usual wait between checks, not after the short network retry.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -27,6 +33,8 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Keeps the splash from flashing when the check is instant.
 const SPLASH_MIN: Duration = Duration::from_millis(700);
+/// Holds the version that last failed to install, next to the settings.
+const FAILED_FILE: &str = "update-failed.txt";
 
 #[derive(Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -47,15 +55,80 @@ pub struct Progress {
 }
 
 #[derive(Default)]
-pub struct SplashState(Mutex<Progress>);
+pub struct SplashState {
+    progress: Mutex<Progress>,
+    /// The version that failed to install in this process.
+    failed: Mutex<Option<String>>,
+}
 
 #[tauri::command]
 pub fn update_progress(state: State<'_, SplashState>) -> Progress {
-    *state.0.lock()
+    *state.progress.lock()
 }
 
 fn set_progress(app: &AppHandle, stage: Stage, percent: Option<u8>) {
-    *app.state::<SplashState>().0.lock() = Progress { stage, percent };
+    *app.state::<SplashState>().progress.lock() = Progress { stage, percent };
+}
+
+/// Why no update was installed.
+enum Failure {
+    /// Checking or downloading failed: worth trying again soon.
+    Fetch(String),
+    /// The download is fine but could not be installed: trying again soon
+    /// would only download it again for nothing.
+    Install(String),
+}
+
+impl Failure {
+    /// How long to wait before the next check.
+    fn wait(&self) -> Duration {
+        match self {
+            Failure::Fetch(e) => {
+                log::warn!("update: {e}");
+                RETRY_AFTER
+            }
+            Failure::Install(e) => {
+                log::warn!("update install: {e}");
+                CHECK_EVERY
+            }
+        }
+    }
+}
+
+fn failed_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join(FAILED_FILE))
+}
+
+fn failed_version(app: &AppHandle) -> Option<String> {
+    if let Some(v) = app.state::<SplashState>().failed.lock().clone() {
+        return Some(v);
+    }
+    let text = std::fs::read_to_string(failed_path(app)?).ok()?;
+    Some(text.trim().to_owned()).filter(|v| !v.is_empty())
+}
+
+/// Remembers the version that failed to install, or forgets it with `None`.
+fn set_failed(app: &AppHandle, version: Option<&str>) {
+    *app.state::<SplashState>().failed.lock() = version.map(str::to_owned);
+    let Some(path) = failed_path(app) else {
+        return;
+    };
+    let result = match version {
+        Some(v) => path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, v)),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            r => r,
+        },
+    };
+    if let Err(e) = result {
+        log::warn!("update: {}: {e}", path.display());
+    }
 }
 
 /// Development builds never replace themselves and start right away.
@@ -87,10 +160,7 @@ pub fn launch(app: &AppHandle) -> tauri::Result<()> {
                 return;
             }
             Ok(None) => CHECK_EVERY,
-            Err(e) => {
-                log::warn!("update: {e}");
-                RETRY_AFTER
-            }
+            Err(e) => e.wait(),
         };
         if let Some(rest) = SPLASH_MIN.checked_sub(shown.elapsed()) {
             sleep(rest).await;
@@ -119,10 +189,7 @@ async fn watch(app: AppHandle, mut wait: Duration) {
                 return;
             }
             Ok(None) => CHECK_EVERY,
-            Err(e) => {
-                log::warn!("update: {e}");
-                RETRY_AFTER
-            }
+            Err(e) => e.wait(),
         };
     }
 }
@@ -135,19 +202,25 @@ async fn sleep(d: Duration) {
 }
 
 /// Installs a newer release if there is one and returns its version.
-/// `splash` reports each step to the splash window.
-async fn check_and_install(app: &AppHandle, splash: bool) -> Result<Option<String>, String> {
+/// `splash` reports each step to the splash window, and skips a version that
+/// already failed to install: the launch must not wait on a download that
+/// cannot be used. The running app still tries it, every `CHECK_EVERY`.
+async fn check_and_install(app: &AppHandle, splash: bool) -> Result<Option<String>, Failure> {
     let update = app
         .updater_builder()
         .timeout(CHECK_TIMEOUT)
         .build()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| Failure::Fetch(e.to_string()))?
         .check()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Failure::Fetch(e.to_string()))?;
     let Some(mut update) = update else {
         return Ok(None);
     };
+    if splash && failed_version(app).as_deref() == Some(update.version.as_str()) {
+        log::info!("update: {} failed to install before", update.version);
+        return Ok(None);
+    }
     update.timeout = Some(DOWNLOAD_TIMEOUT);
 
     let mut received = 0usize;
@@ -166,7 +239,7 @@ async fn check_and_install(app: &AppHandle, splash: bool) -> Result<Option<Strin
             || {},
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Failure::Fetch(e.to_string()))?;
     if splash {
         set_progress(app, Stage::Installing, None);
     }
@@ -175,14 +248,22 @@ async fn check_and_install(app: &AppHandle, splash: bool) -> Result<Option<Strin
     // task while it runs, for the same reason the six hour wait between
     // checks is a timer rather than a parked thread.
     let version = update.version.clone();
-    tauri::async_runtime::spawn_blocking(move || install(&update, &bytes))
+    let installed = tauri::async_runtime::spawn_blocking(move || install(&update, &bytes))
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+    if let Err(e) = installed {
+        set_failed(app, Some(&version));
+        return Err(Failure::Install(e));
+    }
+    if failed_version(app).is_some() {
+        set_failed(app, None);
+    }
     Ok(Some(version))
 }
 
 #[cfg(windows)]
-fn install(_update: &Update, bytes: &[u8]) -> Result<(), String> {
+fn install(update: &Update, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
 
     // The verified bytes are staged next to the executable, in a file this
@@ -203,6 +284,9 @@ fn install(_update: &Update, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| e.to_string())
         .and_then(|()| self_replace::self_replace(&tmp).map_err(|e| e.to_string()));
     let _ = std::fs::remove_file(&tmp);
+    if result.is_ok() {
+        crate::install::updated(&update.version);
+    }
     result
 }
 
