@@ -4,9 +4,11 @@
 //! itself to `%LOCALAPPDATA%\AudioMirror`, registers itself (Start menu
 //! shortcut, entry in Installed apps) and relaunches from there, without a
 //! window or a question. Each launch from the install folder refreshes that
-//! registration, so the version Windows shows follows the updates, which
-//! replace the installed executable in place. `--uninstall`, run by Windows
-//! from Installed apps, undoes it all and keeps the settings.
+//! registration, and an update that replaces the installed executable in
+//! place records its version right away (`updated`): that version is what
+//! keeps an older setup file from overwriting the update, and Windows shows
+//! it. `--uninstall`, run by Windows from Installed apps, undoes it all and
+//! keeps the settings.
 
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
@@ -132,6 +134,23 @@ fn installed_version() -> Option<String> {
         .open_subkey(UNINSTALL_KEY)
         .and_then(|k| k.get_value("DisplayVersion"))
         .ok()
+}
+
+/// Called by the updater once it has replaced this executable with `version`.
+/// Only the installed copy is the one setup files compare against.
+pub fn updated(version: &str) {
+    let (Some(dir), Ok(current)) = (install_dir(), env::current_exe()) else {
+        return;
+    };
+    if !same_file(&current, &dir.join(EXE_NAME)) {
+        return;
+    }
+    let result = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(UNINSTALL_KEY, winreg::enums::KEY_SET_VALUE)
+        .and_then(|k| k.set_value("DisplayVersion", &version));
+    if let Err(e) = result {
+        log::warn!("install: {e}");
+    }
 }
 
 fn copy_to(current: &Path, dir: &Path, target: &Path) -> io::Result<()> {
