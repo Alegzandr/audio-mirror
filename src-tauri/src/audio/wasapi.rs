@@ -12,6 +12,7 @@
 //!   from `IAudioClock`, which OBS does not use.
 
 use std::ffi::c_void;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -37,7 +38,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, ResetEvent,
-    SetEvent, WaitForMultipleObjects, INFINITE,
+    SetEvent, WaitForMultipleObjects,
 };
 use windows::Win32::System::Variant::VT_LPWSTR;
 
@@ -343,25 +344,43 @@ fn captured_output(source: &str) -> Option<String> {
 
 /// `ConvertSpeakerLayout` of `win-wasapi`.
 fn capture_speakers(mask: u32, channels: usize) -> Speakers {
-    match mask {
-        KSAUDIO_SPEAKER_2POINT1 => Speakers::TwoPointOne,
-        KSAUDIO_SPEAKER_SURROUND => Speakers::FourPointZero,
-        OBS_KSAUDIO_SPEAKER_4POINT1 => Speakers::FourPointOne,
-        KSAUDIO_SPEAKER_5POINT1_SURROUND => Speakers::FivePointOne,
-        KSAUDIO_SPEAKER_7POINT1_SURROUND => Speakers::SevenPointOne,
-        _ => Speakers::from_channels(channels),
-    }
+    with_channels(
+        channels,
+        match mask {
+            KSAUDIO_SPEAKER_2POINT1 => Speakers::TwoPointOne,
+            KSAUDIO_SPEAKER_SURROUND => Speakers::FourPointZero,
+            OBS_KSAUDIO_SPEAKER_4POINT1 => Speakers::FourPointOne,
+            KSAUDIO_SPEAKER_5POINT1_SURROUND => Speakers::FivePointOne,
+            KSAUDIO_SPEAKER_7POINT1_SURROUND => Speakers::SevenPointOne,
+            _ => Speakers::Unknown,
+        },
+    )
 }
 
 /// `convert_speaker_layout` of `wasapi-output.c`.
 fn monitor_speakers(mask: u32, channels: usize) -> Speakers {
-    match mask {
-        KSAUDIO_SPEAKER_2POINT1 => Speakers::TwoPointOne,
-        KSAUDIO_SPEAKER_SURROUND => Speakers::FourPointZero,
-        OBS_KSAUDIO_SPEAKER_4POINT1 => Speakers::FourPointOne,
-        KSAUDIO_SPEAKER_5POINT1 => Speakers::FivePointOne,
-        KSAUDIO_SPEAKER_7POINT1 => Speakers::SevenPointOne,
-        _ => Speakers::from_channels(channels),
+    with_channels(
+        channels,
+        match mask {
+            KSAUDIO_SPEAKER_2POINT1 => Speakers::TwoPointOne,
+            KSAUDIO_SPEAKER_SURROUND => Speakers::FourPointZero,
+            OBS_KSAUDIO_SPEAKER_4POINT1 => Speakers::FourPointOne,
+            KSAUDIO_SPEAKER_5POINT1 => Speakers::FivePointOne,
+            KSAUDIO_SPEAKER_7POINT1 => Speakers::SevenPointOne,
+            _ => Speakers::Unknown,
+        },
+    )
+}
+
+/// The layout a mask names, if it has `channels` channels, else the one for
+/// the bare count. OBS takes the mask on trust, but the buffers are sized by
+/// `nChannels`: a driver that reports, say, a 5.1 mask on an 8 channel mix
+/// format would have the copies run past the end of one of them.
+fn with_channels(channels: usize, from_mask: Speakers) -> Speakers {
+    if from_mask.channels() == channels {
+        from_mask
+    } else {
+        Speakers::from_channels(channels)
     }
 }
 
@@ -439,7 +458,17 @@ pub fn start_capture(source: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Captur
         );
         std::thread::Builder::new()
             .name("win-wasapi: capture thread".into())
-            .spawn(move || capture_thread(source_type, hub, &stop, &restart, &state))
+            .spawn(move || {
+                // A panic here, in the capture or in a monitor fed from this
+                // thread, would end it with the state still `Active` and the
+                // source silent for good. `Failed` has the session reopen it.
+                let run = || capture_thread(source_type, hub, &stop, &restart, &state);
+                if std::panic::catch_unwind(AssertUnwindSafe(run)).is_err() {
+                    log::error!("capture thread panicked");
+                    *state.lock() =
+                        CaptureState::Failed(msg::SYSTEM.detail("capture thread panicked"));
+                }
+            })
             .map_err(|e| msg::SYSTEM.detail(e))?
     };
 
@@ -502,8 +531,10 @@ fn capture_thread(
                 *state.lock() = CaptureState::Active {
                     format: describe(active.spec.rate, active.spec.speakers.channels()),
                 };
+                // An input that goes away stops signalling: the timeout is
+                // what gets `process_capture_data` to see it is gone.
                 let wake = if source_type.is_input() {
-                    INFINITE
+                    RECONNECT_INTERVAL_MS
                 } else {
                     LOOPBACK_WAKE_MS
                 };
@@ -801,6 +832,10 @@ fn init_monitor_client(device_id: &str) -> Result<MonitorClient, Message> {
             speakers: monitor_speakers(mix.channel_mask(), channels),
             format: SampleFormat::Float,
         };
+        // No layout for that many channels: nothing to resample to.
+        if to.speakers.channels() != channels {
+            return Err(msg::RESAMPLER.detail(format!("{channels} channels")));
+        }
         let resampler = Resampler::adjustable(to, from).ok_or(msg::RESAMPLER)?;
 
         let buffer_frames = client
@@ -1053,6 +1088,15 @@ mod tests {
             Speakers::SevenPointOne
         );
         assert_eq!(monitor_speakers(0, 7), Speakers::Unknown);
+        // A mask that disagrees with the channel count is not trusted.
+        assert_eq!(
+            monitor_speakers(KSAUDIO_SPEAKER_5POINT1, 8),
+            Speakers::SevenPointOne
+        );
+        assert_eq!(
+            capture_speakers(KSAUDIO_SPEAKER_7POINT1_SURROUND, 6),
+            Speakers::FivePointOne
+        );
     }
 
     #[test]
