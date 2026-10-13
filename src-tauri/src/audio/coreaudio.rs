@@ -17,7 +17,7 @@
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -95,6 +95,7 @@ const kAudioUnitType_Output: u32 = fourcc(b"auou");
 const kAudioUnitSubType_HALOutput: u32 = fourcc(b"ahal");
 const kAudioUnitManufacturer_Apple: u32 = fourcc(b"appl");
 const kAudioUnitProperty_StreamFormat: u32 = 8;
+const kAudioUnitProperty_MaximumFramesPerSlice: u32 = 14;
 const kAudioOutputUnitProperty_CurrentDevice: u32 = 2000;
 const kAudioOutputUnitProperty_EnableIO: u32 = 2003;
 const kAudioOutputUnitProperty_SetInputCallback: u32 = 2005;
@@ -948,6 +949,8 @@ struct RenderState {
     buffers: Vec<Vec<u8>>,
     /// Backing store for an `AudioBufferList`, 8-byte aligned.
     buf_list: Vec<u64>,
+    /// [`CoreAudioData::render_failed`].
+    failed: Arc<AtomicI32>,
 }
 
 impl RenderState {
@@ -979,6 +982,10 @@ struct CoreAudioData {
     /// Handed to the render callback for the lifetime of the unit, and read
     /// back here only once `AudioOutputUnitStop` has returned.
     render: *mut RenderState,
+    /// First `AudioUnitRender` error since the unit started, `noErr` while
+    /// none. Set by the render callback, which can neither log nor take the
+    /// state lock, and turned into a reconnect by the reconnect thread.
+    render_failed: Arc<AtomicI32>,
 }
 
 // SAFETY: the audio unit and the render state are driven from the reconnect
@@ -1136,6 +1143,23 @@ impl CoreAudioData {
             ) {
                 return false;
             }
+            // `mac-audio.c` sizes the planes from the buffer frame size
+            // alone, which any other app can raise while this one runs;
+            // every render then fails. The unit never asks for more than
+            // its maximum slice, so the planes hold at least that.
+            let mut max_frames = 0u32;
+            let mut msize = 4u32;
+            if AudioUnitGetProperty(
+                self.unit,
+                kAudioUnitProperty_MaximumFramesPerSlice,
+                kAudioUnitScope_Global,
+                0,
+                &mut max_frames as *mut _ as *mut c_void,
+                &mut msize,
+            ) == noErr
+            {
+                frames = frames.max(max_frames);
+            }
             let mut dsize = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
             if !ca_success(
                 AudioUnitGetProperty(
@@ -1179,7 +1203,9 @@ impl CoreAudioData {
             spec: self.spec,
             buffers: (0..count).map(|_| vec![0u8; bytes]).collect(),
             buf_list: vec![0u64; bytes_needed.div_ceil(8)],
+            failed: self.render_failed.clone(),
         });
+        self.render_failed.store(noErr, Ordering::Relaxed);
 
         let list = render.buf_list();
         // SAFETY: the byte buffer is sized for `count` AudioBuffer entries.
@@ -1228,7 +1254,14 @@ unsafe extern "C" fn input_callback(
             frames,
             list,
         );
-        if !ca_success(stat, "audio retrieval") {
+        if stat != noErr {
+            // `mac-audio.c` logs here and carries on, on every callback for
+            // as long as the render keeps failing, which it does once the
+            // device's buffer outgrows the planes. Only the first error is
+            // kept, without logging or locking on this thread; the
+            // reconnect thread reports it and rebuilds the unit.
+            let failed = &render.failed;
+            let _ = failed.compare_exchange(noErr, stat, Ordering::Relaxed, Ordering::Relaxed);
             return noErr;
         }
     }
@@ -1471,6 +1504,7 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Messa
             format: SampleFormat::FloatPlanar,
         },
         render: ptr::null_mut(),
+        render_failed: Arc::new(AtomicI32::new(noErr)),
     })));
     let exit = Arc::new(AtomicBool::new(false));
 
@@ -1483,6 +1517,11 @@ fn start_input(uid: &str, hub: Arc<SourceHub>) -> Result<Box<dyn Capture>, Messa
             .spawn(move || loop {
                 {
                     let mut ca = shared.lock();
+                    let stat = ca.render_failed.swap(noErr, Ordering::Relaxed);
+                    if stat != noErr {
+                        log::warn!("coreaudio: audio retrieval failed: {stat}");
+                        ca.set_state(CaptureState::Retrying(msg::DEVICE_UNAVAILABLE.into()));
+                    }
                     let lost = matches!(*state.lock(), CaptureState::Retrying(_));
                     // SAFETY: the unit is driven from this thread only.
                     unsafe {
