@@ -669,7 +669,6 @@ function animateMeters() {
 function showUpdate(version) {
   const restart = $("restart");
   restart.hidden = !version;
-  $("version").hidden = Boolean(version);
   if (version) restart.title = t("update.installed", { version });
 }
 

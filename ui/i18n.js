@@ -57,7 +57,7 @@
       "run.partial": "{playing} of {total} playing",
       "error.retrying": "{message}. Retrying.",
       "autostart": "Start with system",
-      "update.restart": "Restart to update",
+      "update.restart": "Update",
       "update.installed": "Version {version} is installed",
       "quit": "Quit",
       "splash.checking": "Checking for updates…",
