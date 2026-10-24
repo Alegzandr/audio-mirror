@@ -15,7 +15,10 @@
   <div class="panel">
     <header class="panel-head" id="head">
       <h1>Audio Mirror</h1>
-      <span class="run-state" id="run-state" aria-live="polite"></span>
+      <div class="head-end">
+        <span class="run-state" id="run-state" aria-live="polite"></span>
+        <button type="button" class="btn btn-primary btn-small" id="restart" data-i18n="update.restart" hidden>Update</button>
+      </div>
     </header>
 
     <main id="scroller">
@@ -60,7 +63,6 @@
       </label>
       <div class="foot-actions">
         <span class="version" id="version"></span>
-        <button type="button" class="btn btn-primary" id="restart" data-i18n="update.restart" hidden>Restart to update</button>
         <button type="button" class="btn btn-plain" id="quit" data-i18n="quit">Quit</button>
       </div>
     </footer>

@@ -233,6 +233,13 @@ svg { display: block; flex: none; }
   white-space: nowrap;
 }
 
+.head-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .run-state {
   color: var(--text-2);
   text-align: right;
