@@ -232,6 +232,13 @@ svg { display: block; flex: none; }
   letter-spacing: var(--track-15);
   white-space: nowrap;
 }
+/* Inline so the title keeps its text baseline, which aligns the header. */
+.app-icon {
+  width: 18px;
+  height: 18px;
+  margin-right: 7px;
+  vertical-align: -4px;
+}
 
 .head-end {
   display: flex;
