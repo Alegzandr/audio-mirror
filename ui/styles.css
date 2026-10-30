@@ -761,6 +761,11 @@ main {
   font: var(--w-semibold) 17px/1.2 var(--font-display);
   letter-spacing: var(--track-17);
 }
+.splash .app-icon {
+  width: 20px;
+  height: 20px;
+  margin-right: 8px;
+}
 .splash-state { color: var(--text-2); }
 .splash-meter {
   flex: none;
