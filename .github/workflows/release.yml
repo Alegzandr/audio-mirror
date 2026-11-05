@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A rehearsal from any branch: builds and packages the three artifacts
+  # under the version in Cargo.toml, without signing or publishing them.
+  workflow_dispatch:
 
 # Read-only by default; only the publish job can write the release.
 permissions:
@@ -25,9 +28,13 @@ jobs:
       - id: v
         name: Tag, version and branch
         run: |
+          cargo_version=$(grep -m1 '^version' app/Cargo.toml | cut -d '"' -f2)
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           tag="${GITHUB_REF_NAME}"
           version="${tag#v}"
-          cargo_version=$(grep -m1 '^version' app/Cargo.toml | cut -d '"' -f2)
           if [ "$version" != "$cargo_version" ]; then
             echo "::error::Tag $tag does not match version $cargo_version in Cargo.toml"
             exit 1
@@ -117,6 +124,7 @@ jobs:
   # lockfile in scripts/sign, whose format every install checks.
   sign:
     name: Sign updates
+    if: github.event_name == 'push'
     needs: [verify, build]
     runs-on: ubuntu-22.04
     env:
@@ -151,6 +159,7 @@ jobs:
 
   publish:
     name: Publish release
+    if: github.event_name == 'push'
     needs: [verify, sign]
     runs-on: ubuntu-22.04
     permissions:
