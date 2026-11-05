@@ -2,7 +2,7 @@
 //!
 //! The port keeps OBS's English wording, which is also what reaches the log,
 //! but every message carries a stable code so the interface can translate it
-//! without matching on the text. `ui/i18n.js` keys its table on these codes,
+//! without matching on the text. `i18n.rs` keys its table on these codes,
 //! and [`tests::codes_are_translated`] checks that the two stay in step.
 
 use std::fmt;
@@ -196,22 +196,17 @@ mod tests {
         assert_eq!(codes.len(), count, "two kinds share a code");
     }
 
-    /// The interface translates by code, so every code must appear in the
-    /// table of `ui/i18n.js`. A new message without a translation fails here
+    /// The interface translates by code, so every code must have a French
+    /// wording in `i18n.rs`. A new message without a translation fails here
     /// instead of silently reaching the user in English.
     #[test]
     fn codes_are_translated() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../ui/i18n.js");
-        let js = std::fs::read_to_string(path).expect("ui/i18n.js");
         let missing: Vec<&str> = ALL
             .iter()
             .map(|k| k.code)
-            .filter(|code| *code != SYSTEM.code && !js.contains(&format!("\"{code}\"")))
+            .filter(|code| *code != SYSTEM.code && !crate::i18n::Lang::Fr.translates(code))
             .collect();
-        assert!(
-            missing.is_empty(),
-            "not translated in ui/i18n.js: {missing:?}"
-        );
+        assert!(missing.is_empty(), "not translated in i18n.rs: {missing:?}");
     }
 
     #[test]

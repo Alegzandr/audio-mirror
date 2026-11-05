@@ -8,13 +8,16 @@ license = "MIT"
 
 [lib]
 name = "audio_mirror_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6", features = [] }
+winresource = "0.1"
 
 [dependencies]
-tauri = { version = "2.11", features = ["tray-icon", "image-png", "macos-private-api"] }
+gpui = "0.2.2"
+futures = "0.3"
+image = { version = "0.25.1", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+unicode-segmentation = "1"
 auto-launch = "0.5"
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 minisign-verify = "0.2"
@@ -32,6 +35,8 @@ self-replace = "1.5"
 windows = { version = "0.62", features = [
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Security",
     "Win32_System_Com",
@@ -40,6 +45,7 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Variant",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
@@ -48,8 +54,12 @@ windows = { version = "0.62", features = [
 windows-core = "0.62"
 winreg = "0.55"
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon = "0.21"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libpulse-sys = "1.23"
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tar = "0.4"

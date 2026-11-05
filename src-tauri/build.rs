@@ -4,35 +4,14 @@
 //! 1. `FFMPEG_DIR` (a prefix with `lib/` inside)
 //! 2. vcpkg on Windows (`VCPKG_ROOT`, or `../../vcpkg` next to the project)
 //! 3. `third_party/ffmpeg/<target>` built by `scripts/build-ffmpeg.sh`
+//!
+//! On Windows it also gives the executable its icon and version details.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
-/// Commands from `lib.rs`. Listing them makes each one denied unless a file in
-/// `capabilities/` grants it to a window, so the splash can only poll its
-/// progress and the panel cannot reach that command.
-const COMMANDS: &[&str] = &[
-    "snapshot",
-    "status",
-    "set_source",
-    "set_output_enabled",
-    "set_output_volume",
-    "set_output_muted",
-    "rename_output",
-    "source_menu",
-    "set_autostart",
-    "hide_panel",
-    "restart",
-    "quit",
-    "update_progress",
-];
-
 fn main() {
-    tauri_build::try_build(
-        tauri_build::Attributes::new()
-            .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
-    )
-    .expect("tauri build");
+    windows_resources();
 
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
@@ -80,5 +59,23 @@ fn main() {
         println!("cargo:rustc-link-lib=bcrypt");
     } else if target.contains("linux") {
         println!("cargo:rustc-link-lib=m");
+    }
+}
+
+/// The icon Explorer and the taskbar show, and the details in Properties.
+/// GPUI brings the application manifest itself.
+fn windows_resources() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("icons/icon.ico")
+        .set("ProductName", "Audio Mirror")
+        .set("FileDescription", "Audio Mirror")
+        .set("CompanyName", "Alegzandr")
+        .set("LegalCopyright", "MIT License");
+    if let Err(e) = res.compile() {
+        panic!("Windows resources: {e}");
     }
 }
