@@ -14,3 +14,16 @@ pub const IDENTIFIER: &str = "io.github.alegzandr.audiomirror";
 pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join(IDENTIFIER))
 }
+
+/// Folder of the log, where Tauri's log plugin wrote it:
+/// `~/Library/Logs/<identifier>` on macOS, else `<local data>/<identifier>/logs`.
+pub fn log_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        dirs::home_dir().map(|d| d.join("Library/Logs").join(IDENTIFIER))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        dirs::data_local_dir().map(|d| d.join(IDENTIFIER).join("logs"))
+    }
+}

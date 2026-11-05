@@ -1,25 +1,25 @@
 pub mod audio;
+mod autostart;
 pub mod config;
 mod glass;
 mod i18n;
 #[cfg(windows)]
 mod install;
+mod logging;
 mod paths;
+mod single_instance;
 mod state;
+mod tauri_update;
 mod tray;
 mod updater;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use audio::{DeviceList, Status};
 use config::AppConfig;
 use i18n::Lang;
 pub(crate) use state::AppState;
-
-/// Argument passed by the login item: start in the tray, panel hidden.
-const AUTOSTART_ARG: &str = "--autostart";
 
 #[derive(Serialize)]
 struct Snapshot {
@@ -40,7 +40,7 @@ async fn snapshot(app: AppHandle, state: State<'_, AppState>) -> Result<Snapshot
         version: app.package_info().version.to_string(),
         config: state.config(),
         devices,
-        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        autostart: autostart::is_enabled(),
         update_ready: state.update_ready.lock().clone(),
     })
 }
@@ -174,15 +174,8 @@ async fn rename_output(id: String, description: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
-    let launcher = app.autolaunch();
-    let result = if enabled {
-        launcher.enable()
-    } else {
-        launcher.disable()
-    };
-    result.map_err(|e| e.to_string())?;
-    launcher.is_enabled().map_err(|e| e.to_string())
+fn set_autostart(enabled: bool) -> Result<bool, String> {
+    autostart::set(enabled)
 }
 
 #[tauri::command]
@@ -192,9 +185,9 @@ fn hide_panel(app: AppHandle) {
 
 #[tauri::command]
 fn restart(app: AppHandle) {
-    // Goes through RunEvent::Exit so the single-instance lock is released
-    // before the new process starts; `restart()` would skip it.
-    app.request_restart();
+    // The new copy waits for this one to release the single-instance lock.
+    updater::relaunch();
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -209,10 +202,7 @@ pub(crate) fn start(app: &AppHandle) {
     state.start_engine();
 
     // An install moved the executable: point the login item at the new path.
-    let launcher = app.autolaunch();
-    if launcher.is_enabled().unwrap_or(false) {
-        let _ = launcher.enable();
-    }
+    autostart::refresh();
 
     if let Some(panel) = app.get_webview_window(tray::PANEL) {
         glass::apply(&panel);
@@ -228,31 +218,14 @@ pub(crate) fn start(app: &AppHandle) {
     if let Err(e) = tray::setup(app) {
         log::error!("tray: {e}");
     }
-    if !std::env::args().any(|a| a == AUTOSTART_ARG) {
+    if !std::env::args().any(|a| a == autostart::ARG) {
         tray::show_panel(app);
     }
 }
 
-/// Writes the engine's messages to a rotating file in the app log folder, so
-/// a device that refuses to open leaves a trace to report. Without this the
-/// `log` calls spread over the audio backends go nowhere.
-fn logging<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
-    let mut builder = tauri_plugin_log::Builder::new()
-        .level(log::LevelFilter::Info)
-        .max_file_size(512 * 1024)
-        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
-        .target(tauri_plugin_log::Target::new(
-            tauri_plugin_log::TargetKind::LogDir {
-                file_name: Some("audio-mirror".into()),
-            },
-        ));
-    if cfg!(debug_assertions) {
-        builder = builder.target(tauri_plugin_log::Target::new(
-            tauri_plugin_log::TargetKind::Stdout,
-        ));
-    }
-    builder.build()
-}
+/// The app, once Tauri has built it, for the single-instance listener that
+/// starts before it.
+static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -261,23 +234,25 @@ pub fn run() {
         return;
     }
 
+    logging::init();
+    let restarted = std::env::args().any(|a| a == updater::RESTARTED_ARG);
+    let _instance = match single_instance::acquire(restarted, || {
+        if let Some(app) = APP.get() {
+            // During the startup update check, the splash is already showing.
+            if app.get_webview_window(tauri_update::SPLASH).is_none() {
+                tray::show_panel(app);
+            }
+        }
+    }) {
+        single_instance::Outcome::Primary(guard) => guard,
+        single_instance::Outcome::Secondary => return,
+    };
+
     let lang = Lang::detect();
 
     tauri::Builder::default()
-        .plugin(logging())
         .plugin(i18n::plugin(lang))
         .plugin(glass::plugin())
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            // During the startup update check, the splash is already showing.
-            if app.get_webview_window(updater::SPLASH).is_none() {
-                tray::show_panel(app);
-            }
-        }))
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            Some(vec![AUTOSTART_ARG]),
-        ))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -286,10 +261,11 @@ pub fn run() {
             let dir = paths::config_dir().ok_or("no settings folder")?;
             let path = config::config_path(dir);
             app.manage(AppState::new(path, lang));
-            app.manage(updater::SplashState::default());
+            app.manage(updater::Updater::default());
+            let _ = APP.set(app.handle().clone());
 
             if updater::enabled() {
-                updater::launch(app.handle())?;
+                tauri_update::launch(app.handle())?;
             } else {
                 start(app.handle());
             }
@@ -308,7 +284,7 @@ pub fn run() {
             hide_panel,
             restart,
             quit,
-            updater::update_progress,
+            tauri_update::update_progress,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start Audio Mirror")
