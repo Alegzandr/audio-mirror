@@ -3,11 +3,14 @@
 set -eu
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-  build-essential file \
-  libwebkit2gtk-4.1-dev \
-  libayatana-appindicator3-dev \
-  librsvg2-dev \
-  libxdo-dev \
-  libssl-dev \
+  build-essential file pkg-config \
+  libfontconfig-dev \
+  libfreetype-dev \
+  libwayland-dev \
+  libx11-xcb-dev \
+  libxkbcommon-dev \
+  libxkbcommon-x11-dev \
+  libvulkan-dev \
+  libzstd-dev \
   libpulse-dev \
   xz-utils

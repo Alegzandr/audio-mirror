@@ -141,8 +141,10 @@ pub fn as_f32(bytes: &[u8]) -> std::borrow::Cow<'_, [f32]> {
     } else {
         std::borrow::Cow::Owned(
             bytes[..len * 4]
-                .chunks_exact(4)
-                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_ne_bytes(*c))
                 .collect(),
         )
     }

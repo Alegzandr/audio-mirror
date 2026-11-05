@@ -132,11 +132,11 @@ pub fn scale_u8(samples: &mut [u8], vol: f32) -> f32 {
 pub fn scale_s16(samples: &mut [u8], vol: f32) -> f32 {
     let unity = close_float(vol, 1.0);
     let mut peak = 0f32;
-    for c in samples.chunks_exact_mut(2) {
-        let mut v = i16::from_ne_bytes([c[0], c[1]]);
+    for c in samples.as_chunks_mut::<2>().0 {
+        let mut v = i16::from_ne_bytes(*c);
         if !unity {
             v = (v as f32 * vol) as i16;
-            c.copy_from_slice(&v.to_ne_bytes());
+            *c = v.to_ne_bytes();
         }
         peak = peak.max((v as f32 / 32768.0).abs());
     }
@@ -146,11 +146,11 @@ pub fn scale_s16(samples: &mut [u8], vol: f32) -> f32 {
 pub fn scale_s32(samples: &mut [u8], vol: f32) -> f32 {
     let unity = close_float(vol, 1.0);
     let mut peak = 0f32;
-    for c in samples.chunks_exact_mut(4) {
-        let mut v = i32::from_ne_bytes([c[0], c[1], c[2], c[3]]);
+    for c in samples.as_chunks_mut::<4>().0 {
+        let mut v = i32::from_ne_bytes(*c);
         if !unity {
             v = (v as f32 * vol) as i32;
-            c.copy_from_slice(&v.to_ne_bytes());
+            *c = v.to_ne_bytes();
         }
         peak = peak.max((v as f32 / 2_147_483_648.0).abs());
     }

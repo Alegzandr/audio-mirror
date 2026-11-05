@@ -160,7 +160,7 @@ mod imp {
             super::rgba(include_bytes!("../../icons/32x32.png")).ok_or("tray icon")?;
         // StatusNotifierItem wants ARGB32 in network byte order.
         let mut argb = rgba;
-        for px in argb.chunks_exact_mut(4) {
+        for px in argb.as_chunks_mut::<4>().0 {
             px.rotate_right(1);
         }
         let item = Item {

@@ -8,7 +8,9 @@
 //! one display, which lands wrong across displays of different scales.
 
 use gpui::{Window, WindowBackgroundAppearance};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::HasWindowHandle;
+#[cfg(any(windows, target_os = "macos"))]
+use raw_window_handle::RawWindowHandle;
 
 use super::theme::Glass;
 

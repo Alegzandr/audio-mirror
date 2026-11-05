@@ -11,6 +11,7 @@ pub enum Glass {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Liquid,
     /// Vibrancy (older macOS) or Acrylic (Windows).
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     Native,
     /// No system material (Linux): the tint becomes an opaque ground.
     None,
