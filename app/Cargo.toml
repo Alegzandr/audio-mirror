@@ -45,6 +45,7 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Variant",
+    "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
@@ -62,6 +63,9 @@ libpulse-sys = "1.23"
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Shaders compiled at launch: building them needs Xcode's Metal toolchain,
+# a separate download since Xcode 26.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 tar = "0.4"
 flate2 = "1"
 objc2 = "0.6"

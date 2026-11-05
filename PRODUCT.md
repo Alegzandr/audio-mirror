@@ -4,11 +4,11 @@
 
 ## Platform
 
-web
+desktop
 
 ## Stack
 
-Tauri 2 (Rust) with a build-free HTML/CSS/JS interface served from `ui/`. Delegated choice: no framework, the interface is a single tray panel.
+Rust, with the interface drawn in [GPUI](https://www.gpui.rs) (`app/src/ui`). No component library: the interface is a single tray panel, and its controls are drawn by hand after `DESIGN.md`.
 
 ## Users
 

@@ -32,12 +32,14 @@ use super::theme::{font_family, Theme, GUTTER, WEIGHTS};
 use super::view::{self, Tone};
 use super::widgets::{self, button, glyph_svg, platter, round_button, ButtonKind};
 
-actions!(panel, [HidePanel]);
+actions!(panel, [HidePanel, FocusNext, FocusPrev]);
 
 const CONTEXT: &str = "Panel";
 /// Logical size of the panel window.
 pub const SIZE: (f64, f64) = (380.0, 560.0);
 const STATUS_POLL: Duration = Duration::from_millis(100);
+/// How far an arrow key moves a fader.
+const FADER_STEP: f32 = 0.05;
 /// Width of the volume capsule's invisible thumb, as the range input had.
 const THUMB: f32 = 28.0;
 const MENU_ITEM: f32 = 26.0;
@@ -45,7 +47,11 @@ const MENU_HEADER: f32 = 24.0;
 const MENU_PAD: f32 = 5.0;
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("escape", HidePanel, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("escape", HidePanel, Some(CONTEXT)),
+        KeyBinding::new("tab", FocusNext, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", FocusPrev, Some(CONTEXT)),
+    ]);
 }
 
 /// Settings changes, run one after the other off the UI thread: each one
@@ -128,6 +134,9 @@ pub struct Panel {
     scroll: ScrollHandle,
     focus: FocusHandle,
     menu_focus: FocusHandle,
+    picker_focus: FocusHandle,
+    /// One per output row, so the keyboard can reach each fader.
+    row_focus: HashMap<String, FocusHandle>,
     opens: usize,
     icon: Arc<Image>,
     poll: Option<Task<()>>,
@@ -166,6 +175,8 @@ impl Panel {
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
             menu_focus: cx.focus_handle(),
+            picker_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            row_focus: HashMap::new(),
             opens: 0,
             icon: Arc::new(Image::from_bytes(
                 ImageFormat::Png,
@@ -335,6 +346,33 @@ impl Panel {
             // Straight to the audio thread, in memory only.
             state.set_output_volume(&id, &name, fader, false);
         }
+        cx.notify();
+    }
+
+    /// Keys on a focused output row: M mutes, the arrows move the fader.
+    fn row_key(&mut self, id: &str, name: &str, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let m = &event.keystroke.modifiers;
+        if m.control || m.platform || m.alt || self.editing {
+            return;
+        }
+        let step = match event.keystroke.key.as_str() {
+            "m" => {
+                self.toggle_mute(id.to_owned(), name.to_owned(), cx);
+                cx.stop_propagation();
+                return;
+            }
+            "left" | "down" => -FADER_STEP,
+            "right" | "up" => FADER_STEP,
+            "home" => -1.0,
+            "end" => 1.0,
+            _ => return,
+        };
+        let fader = (self.output_config(id).0 + step).clamp(0.0, 1.0);
+        self.config.output_mut(id, name).fader = fader;
+        let (id, name) = (id.to_owned(), name.to_owned());
+        self.worker
+            .run(move |s| s.set_output_volume(&id, &name, fader, true));
+        cx.stop_propagation();
         cx.notify();
     }
 
@@ -537,7 +575,7 @@ impl Panel {
 
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.take().is_some() {
-            window.focus(&self.focus);
+            window.focus(&self.picker_focus);
             cx.notify();
         }
     }
@@ -559,7 +597,7 @@ impl Panel {
             "enter" | "space" => {
                 if let Some(id) = entries[at].id.clone() {
                     self.choose_source(id, cx);
-                    window.focus(&self.focus);
+                    window.focus(&self.picker_focus);
                 }
                 cx.stop_propagation();
                 return;
@@ -646,6 +684,8 @@ impl Render for Panel {
             .on_action(cx.listener(|_, _: &HidePanel, _, cx| {
                 cx.defer(super::hide_panel);
             }))
+            .on_action(|_: &FocusNext, window, _| window.focus_next())
+            .on_action(|_: &FocusPrev, window, _| window.focus_prev())
             .size_full()
             .relative()
             .flex()
@@ -754,6 +794,19 @@ impl Render for Panel {
                     .child(
                         div()
                             .id("picker")
+                            .track_focus(&self.picker_focus)
+                            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                                let key = e.keystroke.key.as_str();
+                                if this.menu.is_none()
+                                    && matches!(key, "down" | "up" | "enter" | "space")
+                                {
+                                    this.open_menu(window, cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .when(self.picker_focus.is_focused(window), |d| {
+                                d.border_2().border_color(t.accent_soft)
+                            })
                             .relative()
                             .flex()
                             .items_center()
@@ -982,7 +1035,7 @@ impl Panel {
         ix: usize,
         dev: &OutputInfo,
         status: Option<&audio::OutputStatus>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let lang = self.lang;
@@ -1000,6 +1053,13 @@ impl Panel {
         let level = self.meters.get(&dev.id).map_or(0.0, |m| m.level);
         let id = dev.id.clone();
         let name = dev.name.clone();
+        let focus = self
+            .row_focus
+            .entry(dev.id.clone())
+            .or_insert_with(|| cx.focus_handle().tab_index(1).tab_stop(true))
+            .clone();
+        let focused = focus.is_focused(window);
+        let (key_id, key_name) = (id.clone(), name.clone());
 
         // Head: name (or the rename field), state.
         let renaming = self.rename.as_ref().filter(|r| r.id == dev.id);
@@ -1181,6 +1241,11 @@ impl Panel {
         };
 
         platter(t)
+            .track_focus(&focus)
+            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
+                this.row_key(&key_id, &key_name, e, cx);
+            }))
+            .when(focused, |d| d.border_color(t.accent))
             .flex()
             .flex_col()
             .gap(px(10.))

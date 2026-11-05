@@ -58,8 +58,6 @@ Get the file for your system from the [latest release](https://github.com/Alegza
 
 1. Run the `.exe`. There is no installer window: Audio Mirror copies itself to `%LOCALAPPDATA%\AudioMirror`, adds itself to the Start menu and starts. The downloaded file can be deleted afterwards.
 2. The app is not code-signed yet, so SmartScreen may show "Windows protected your PC". Click **More info**, then **Run anyway**.
-3. Audio Mirror needs the WebView2 runtime. It ships with Windows 11 and with recent Windows 10 updates; if the app does not open, install it from [Microsoft](https://developer.microsoft.com/microsoft-edge/webview2/).
-
 The icon appears in the notification area. If you do not see it, click the arrow next to the clock, and drag the icon onto the taskbar to keep it visible.
 
 To uninstall, open **Settings > Apps > Installed apps**, find Audio Mirror and choose **Uninstall**. Your settings are kept in `%APPDATA%\io.github.alegzandr.audiomirror`.
@@ -151,7 +149,7 @@ Right click the tray icon for:
 
 Each time Audio Mirror starts, including at login, a small window checks for a new version before anything else. If there is one, it is downloaded, its signature verified, installed, and the app restarts into it; otherwise (or without network) the app starts right away.
 
-While the app runs, it checks again every few hours. A version found then is installed in the background, and a **Restart to update** button replaces the version number at the bottom of the panel. Nothing changes until you click it or the app next starts.
+While the app runs, it checks again every few hours. A version found then is installed in the background, and an **Update** button appears in the top right corner of the panel. Nothing changes until you click it or the app next starts.
 
 ## Common setups
 
@@ -223,7 +221,7 @@ Shared by all platforms, as in libobs:
 - Every status message carries a stable code as well as OBS's English wording, so the panel translates it by code and falls back to that wording for a message it does not know.
 - An output recorded by the source is never a destination (`OBS_SOURCE_DO_NOT_SELF_MONITOR`). On macOS the capture leaves this app out, so any output can be used with the default output source.
 
-Code layout, in `src-tauri/src/audio`:
+Code layout, in `app/src/audio`:
 
 | File | Port of |
 | --- | --- |
@@ -238,9 +236,9 @@ Code layout, in `src-tauri/src/audio`:
 
 ## Development
 
-Audio Mirror is a [Tauri 2](https://tauri.app) app: a Rust audio engine and a build-free HTML, CSS and JavaScript panel in `ui/`.
+Audio Mirror is written in Rust: the audio engine in `app/src/audio`, and the tray and panel drawn with [GPUI](https://www.gpui.rs), Zed's UI framework, in `app/src/ui`.
 
-Requirements: Rust (stable), Node.js 22, and FFmpeg's libavutil and libswresample as static libraries:
+Requirements: Rust (stable) and FFmpeg's libavutil and libswresample as static libraries:
 
 - Windows: `vcpkg install ffmpeg[core,swresample]:x64-windows-static-md` (with `VCPKG_ROOT` set, or vcpkg cloned next to this repository)
 - macOS and Linux: `scripts/build-ffmpeg.sh <rust-target>` (on Linux, run `scripts/linux-deps.sh` first)
@@ -248,31 +246,30 @@ Requirements: Rust (stable), Node.js 22, and FFmpeg's libavutil and libswresampl
 `FFMPEG_DIR` can point at any other prefix.
 
 ```sh
-npm ci
-npm run dev        # run the app
-npm run build      # build a release binary
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo run --manifest-path app/Cargo.toml                    # run the app
+cargo build --release --manifest-path app/Cargo.toml        # build a release binary
+cargo test --manifest-path app/Cargo.toml
 ```
 
-Opening `ui/index.html` directly in a browser shows the panel with demo data; the screenshots in this README come from that preview.
+Debug builds skip the update check and the Windows self-install. `scripts/appimage.sh` and `scripts/bundle-macos.sh` package a release build the way the release workflow does.
 
 ### Branches and releases
 
 - `develop` is the working branch. `main` receives merges from `develop`.
 - Every push or pull request to `main` or `develop` runs CI: rustfmt, clippy and the tests on Windows, macOS and Linux.
-- Pushing a tag `vX.Y.Z` on a commit of `main` runs the release workflow: it checks the tag matches the version in `src-tauri/Cargo.toml`, runs the tests, builds the Windows executable, the AppImage and the macOS app, signs them for the updater, and publishes a GitHub release with `latest.json`.
+- Pushing a tag `vX.Y.Z` on a commit of `main` runs the release workflow: it checks the tag matches the version in `app/Cargo.toml`, runs the tests, builds the Windows executable, the AppImage and the macOS app, signs them for the updater, and publishes a GitHub release with `latest.json`.
 
 To release:
 
 ```sh
-# bump version in src-tauri/Cargo.toml and package.json, merge to main, then
+# bump version in app/Cargo.toml, merge to main, then
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
 ### Signing key
 
-Updates are verified with a minisign key. The public key is in `src-tauri/tauri.conf.json`. The private key never enters the repository; the release workflow reads it from two repository secrets:
+Updates are verified with a minisign key, in the encoding of Tauri's updater, which installs made before the GPUI rewrite still use. The public key is `PUBKEY` in `app/src/updater.rs`. The private key never enters the repository; the release workflow reads it from two repository secrets:
 
 - `TAURI_SIGNING_PRIVATE_KEY`: content of the private key file
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: its password

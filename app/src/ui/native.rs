@@ -35,9 +35,14 @@ pub fn glass() -> Glass {
     }
 }
 
-/// The background GPUI is asked for: Liquid Glass is added under a
-/// transparent window instead.
+/// The background GPUI is asked for. Liquid Glass, and the system backdrop
+/// of Windows 11, are added under a transparent window instead; GPUI's own
+/// blur covers older Windows and macOS.
 pub fn background() -> WindowBackgroundAppearance {
+    #[cfg(windows)]
+    if win::system_backdrop() {
+        return WindowBackgroundAppearance::Transparent;
+    }
     match glass() {
         Glass::Native => WindowBackgroundAppearance::Blurred,
         Glass::Liquid | Glass::None => WindowBackgroundAppearance::Transparent,
@@ -217,13 +222,15 @@ pub fn panel_position(
 mod win {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-        DWM_WINDOW_CORNER_PREFERENCE,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW,
+        DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
     };
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         MONITOR_DEFAULTTOPRIMARY,
     };
+    use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -237,9 +244,25 @@ mod win {
         HWND(id as *mut _)
     }
 
+    /// Windows 11 22H2 and later draw Acrylic themselves under a window
+    /// (`DWMSBT_TRANSIENTWINDOW`), with a stronger blur than the older
+    /// composition attribute GPUI uses.
+    pub fn system_backdrop() -> bool {
+        static BUILD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let build = *BUILD.get_or_init(|| {
+            winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+                .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+                .and_then(|k| k.get_value::<String, _>("CurrentBuildNumber"))
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        });
+        build >= 22621
+    }
+
     pub fn prepare(id: isize) {
         let pref: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
-        // SAFETY: a live window of this process, and a value of the size given.
+        // SAFETY: a live window of this process, and values of the sizes given.
         unsafe {
             let _ = DwmSetWindowAttribute(
                 hwnd(id),
@@ -247,6 +270,22 @@ mod win {
                 &pref as *const _ as *const _,
                 std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
             );
+            if system_backdrop() {
+                let margins = MARGINS {
+                    cxLeftWidth: -1,
+                    cxRightWidth: -1,
+                    cyTopHeight: -1,
+                    cyBottomHeight: -1,
+                };
+                let _ = DwmExtendFrameIntoClientArea(hwnd(id), &margins);
+                let backdrop: DWM_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW;
+                let _ = DwmSetWindowAttribute(
+                    hwnd(id),
+                    DWMWA_SYSTEMBACKDROP_TYPE,
+                    &backdrop as *const _ as *const _,
+                    std::mem::size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
+                );
+            }
         }
     }
 

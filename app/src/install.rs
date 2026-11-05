@@ -36,15 +36,16 @@ const OLD_EXE_NAME: &str = "audio-mirror.old.exe";
 const PRODUCT: &str = "Audio Mirror";
 const UNINSTALL_ARG: &str = "--uninstall";
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\AudioMirror";
-/// Values written by the autostart plugin, named after the product.
+/// Values written by the login item (`autostart.rs`), named after the product.
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_APPROVED_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
-/// WebView2 data folder, named after the app identifier.
-const WEBVIEW_DIR: &str = "io.github.alegzandr.audiomirror";
+/// Local data folder, named after the app identifier: the log, and the
+/// WebView2 data versions before the GPUI rewrite left there.
+const LOCAL_DIR: &str = "io.github.alegzandr.audiomirror";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Runs before Tauri starts. Returns false when this process must exit
+/// Runs before anything else. Returns false when this process must exit
 /// (the installed copy was launched, or the app was uninstalled).
 pub fn prepare() -> bool {
     restrict_dll_search();
@@ -212,7 +213,7 @@ fn create_shortcut(target: &Path, link: &Path) -> windows::core::Result<()> {
 }
 
 fn uninstall(dir: &Path) -> io::Result<()> {
-    // Other copies keep their executable and WebView2 files locked.
+    // Other copies keep their executable and their log locked.
     // Full path: a bare name is also looked up next to this executable.
     let _ = Command::new(system32().join("taskkill.exe"))
         .args(["/F", "/T", "/IM", EXE_NAME, "/FI"])
@@ -231,7 +232,7 @@ fn uninstall(dir: &Path) -> io::Result<()> {
         let _ = fs::remove_file(link);
     }
     if let Some(local) = env::var_os("LOCALAPPDATA") {
-        let _ = fs::remove_dir_all(PathBuf::from(local).join(WEBVIEW_DIR));
+        let _ = fs::remove_dir_all(PathBuf::from(local).join(LOCAL_DIR));
     }
 
     // Moves this executable out of the folder, deleted once the process ends.

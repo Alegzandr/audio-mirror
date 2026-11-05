@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Produces the latest.json read by the Tauri updater.
+# Produces the latest.json the updater reads, in the format of Tauri's
+# updater plugin, which installs made before GPUI read too.
 # Usage: latest-json.sh <dir> <version> <owner/repo> <tag>
 set -euo pipefail
 dir=$1 version=$2 repo=$3 tag=$4

@@ -39,22 +39,11 @@ jobs:
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: src-tauri
+          workspaces: app
       - name: rustfmt
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+        run: cargo fmt --manifest-path app/Cargo.toml --check
       - name: clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - name: Frontend syntax
-        run: for f in ui/*.js tests/ui/*.js; do node --check "$f"; done
-      - name: Frontend types
-        run: npm run check:ui
-      - name: Frontend tests
-        run: npm test
+        run: cargo clippy --manifest-path app/Cargo.toml --locked --all-targets -- -D warnings
 
   test:
     name: Tests (${{ matrix.os }})
@@ -82,6 +71,6 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: src-tauri
+          workspaces: app
       - name: cargo test
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        run: cargo test --manifest-path app/Cargo.toml --locked

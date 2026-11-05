@@ -175,8 +175,7 @@ mod tests {
         }
     }
 
-    /// The panel has its own copy of the curve (`ui/view.js`); both are
-    /// checked against the same points, computed with OBS's C formula.
+    /// Checked against points computed with OBS's C formula.
     #[test]
     fn fader_matches_the_shared_reference_points() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fader-curve.json");

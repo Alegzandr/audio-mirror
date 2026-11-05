@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Libraries needed by Tauri 2, PulseAudio and the FFmpeg build on Ubuntu.
+# Libraries needed by GPUI, PulseAudio and the FFmpeg build on Ubuntu.
 set -eu
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
