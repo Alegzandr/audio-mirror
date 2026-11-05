@@ -1,0 +1,8 @@
+{
+  "name": "audio-mirror-sign",
+  "private": true,
+  "description": "Signs update artifacts in the format installs made by any version check (minisign, Tauri's encoding). Used by the release workflow only.",
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

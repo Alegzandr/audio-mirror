@@ -105,7 +105,7 @@ components:
 
 **North Star: "A Control Center module"**
 
-Audio Mirror is drawn the way macOS 27 "Golden Gate" draws Control Center: Liquid Glass played straight, with the extra contrast Golden Gate added. The panel is a 380 by 560 window made of glass: the window itself is transparent and the system blurs what lies behind it (vibrancy `popover` on macOS, Acrylic on Windows, `windowEffects` in `tauri.conf.json`). A tint sits on that glass so text reads over any wallpaper; where no native glass exists (Linux, the browser preview, `data-glass="off"`), the tint becomes an opaque ground.
+Audio Mirror is drawn the way macOS 27 "Golden Gate" draws Control Center: Liquid Glass played straight, with the extra contrast Golden Gate added. The panel is a 380 by 560 window made of glass: the window itself is transparent and the system blurs what lies behind it (vibrancy on macOS, Acrylic on Windows, set up in `app/src/ui/native.rs`). A tint sits on that glass so text reads over any wallpaper; where no native glass exists (Linux), the tint becomes an opaque ground.
 
 The panel is for operating: it lists only the outputs that play, each in its own platter with a thick volume capsule, as Control Center's Sound module. The other devices wait folded in one platter; renaming and removing live behind the Edit button. It follows the OS light or dark theme.
 
@@ -115,15 +115,15 @@ Neutrals are translucent inks and fills, so they take the color of the glass und
 
 ## Typography
 
-SF Pro on macOS (`-apple-system`), left to the system: WebKit tracks it by size and macOS smooths it, so the page sets neither. Everywhere else the bundled Inter variable font (`ui/fonts`, SIL OFL), since SF Pro's license keeps it on Apple platforms; Inter gets SF Pro's tracking table, a touch tighter, and heavier weights (430/530/620) to make up for ClearType drawing it thinner. 13px body, 12px group headings and output states, 15px semibold title. Device names are semibold. Tabular numerals everywhere so dB values hold still.
+SF Pro on macOS (`.SystemUIFont`), left to the system. Everywhere else the bundled Inter variable font (`app/assets/fonts`, SIL OFL), since SF Pro's license keeps it on Apple platforms; Inter gets heavier weights (430/530/620) to make up for ClearType drawing it thinner. GPUI sets no letter spacing, so SF Pro's tracking table is not applied to Inter. 13px body, 12px group headings and output states, 15px semibold title. Device names are semibold. Tabular numerals everywhere so dB values hold still.
 
 ## Layout
 
-Header (title, run-state sentence), scrolling middle, footer (Start with system switch, version, Quit). Groups stack with a 14px gap, platters within a group with 8px. The Source platter holds a pop-up button and the source meter. Each output platter has a head line (name, state) and a controls line: the volume capsule with the live meter just under it, the dB value (fixed 7.5ch), and the round mute button. In edit mode the controls line becomes Rename and Remove capsules.
+Header (title, run-state sentence), scrolling middle, footer (Start with system switch, version, Quit). Groups stack with a 14px gap, platters within a group with 8px. The Source platter holds a pop-up button and the source meter. Each output platter has a head line (name, state) and a controls line: the volume capsule with the live meter just under it, the dB value (fixed width), and the round mute button. In edit mode the controls line becomes Rename and Remove capsules.
 
 ## Elevation & Depth
 
-Liquid Glass: platters carry a specular rim (`inset 0 0.5px 0 platter-edge`), a hairline edge, and a soft shadow; the window has a 0.5px rim. Nothing else lifts. Switch knobs carry a small physical shadow.
+Liquid Glass: platters carry a hairline edge and a soft shadow; the window has a 1px rim. Nothing else lifts. Switch knobs carry a small physical shadow.
 
 ## Shapes
 
@@ -131,22 +131,22 @@ Window 18px (8px on Windows, which rounds undecorated windows itself), platters 
 
 ## Components
 
-- **Buttons:** glass capsules on `fill`. As in AppKit they answer to the press, never to the hover: pressing steps to `fill-active` and shrinks to 0.95 on a spring. The pointer stays an arrow everywhere (a text field gets the I-beam). Primary is solid accent. Plain is text only. Header actions (Edit, Done) are accent text.
+- **Buttons:** glass capsules on `fill`. As in AppKit they answer to the press, never to the hover: pressing steps to `fill-active`. The pointer stays an arrow everywhere (a text field gets the I-beam). Primary is solid accent. Plain is text only. Header actions (Edit, Done) are accent text.
 - **Mute:** a 32px round button with a speaker glyph; pressed, it fills with the accent and the glyph gains a cross.
-- **Volume capsule:** 28px, track color, a white fill to the volume with a speaker glyph at its start; the native range input sits on top, invisible. Muted, the fill turns gray.
+- **Volume capsule:** 28px, track color, a white fill to the volume with a speaker glyph at its start. Pressing anywhere on it sets the volume and dragging moves it; with the row focused, the arrow keys step it and <kbd>M</kbd> mutes. Muted, the fill turns gray.
 - **Level meter:** a 3px capsule under each volume capsule (4px for the source), filled in `meter` gray from the live peak.
-- **Switch:** macOS 26/27 shape, 38 by 22px with a 24 by 18px pill knob that stretches while held, accent when on.
-- **Source pop-up:** a capsule button with up and down chevrons. On macOS it opens the system's own menu (`source_menu` in `lib.rs`, an `NSMenu` with the current source checked and laid over the button); elsewhere the page draws that menu in glass, placed the same way, current item over the button, with group headers, a check, the focused item filled with the accent and full keyboard control. The native select stays underneath as the model.
-- **Scroll bars:** the system's own on macOS; elsewhere an overlay imitation, shown only while the list scrolls.
-- **Glyphs:** a small set of inline SVG glyphs drawn in the SF Symbols manner (speaker, speaker with waves, speaker crossed), filled and stroked in `currentColor`. Text still carries every state.
+- **Switch:** macOS 26/27 shape, 38 by 22px with a 24 by 18px pill knob, accent when on.
+- **Source pop-up:** a capsule button with up and down chevrons. It opens a menu drawn after macOS's pop-up menus, on every system: current item laid over the button, group headers, a check, the focused item filled with the accent, and full keyboard control.
+- **Scroll bars:** none drawn; the list scrolls with the wheel and the trackpad, and a hairline under the header shows it has.
+- **Glyphs:** a small set of SVG glyphs drawn in the SF Symbols manner (speaker with waves, speaker crossed, check, chevrons; `app/assets/icons`), tinted by the text color. Text still carries every state.
 
 ## Motion
 
-SwiftUI's springs, `.smooth`, `.snappy` and `.bouncy` (0.5 s; bounce 0, 0.15, 0.3), integrated and sampled into CSS `linear()` easings (`--smooth`, `--snappy`, `--bouncy`), with cubic-bezier fallbacks. The panel's content settles in on `.snappy` when it opens (header, list and footer a few milliseconds apart; transform and opacity only, the window and its glass appear at once since the system shows them), the source menu pops on `.snappy`, the switch knob crosses on `.bouncy` and stretches while held, a held volume capsule swells evenly, pressed buttons shrink to 0.95, the other devices unfold in a short stagger only when the user unfolds them. The menu's refraction goes on once its pop-in has settled, and its map is computed ahead, in an idle moment, and cached by size. All of it stops under `prefers-reduced-motion`.
+SwiftUI's springs, `.smooth`, `.snappy` and `.bouncy` (0.5 s; bounce 0, 0.15, 0.3), computed in closed form (`spring` in `app/src/ui/widgets.rs`). The panel's header and footer settle in on `.snappy` when it opens (position and opacity only, the window and its glass appear at once since the system shows them), the source menu fades in on `.snappy`, the switch knob crosses on `.bouncy`, the other devices unfold in a short stagger only when the user unfolds them. GPUI cannot scale an element, so pressed buttons and a held capsule do not shrink or swell.
 
 ## Glass
 
-The window's glass comes from the system (`src-tauri/src/glass.rs`): `NSGlassEffectView` (Liquid Glass) on macOS 26 and later, `popover` vibrancy before, Acrylic on Windows, none on Linux; the page reads `window.__AUDIO_MIRROR_GLASS__` and sets `data-glass` (`liquid`, `native`, `none`) to tune its tint. What floats over the panel, the source menu, refracts the panel under its rim (`ui/refraction.js`, after kube.io's Liquid Glass in CSS and SVG): a squircle bezel, Snell's law at n = 1.5, a displacement map fed to `feDisplacementMap` as a `backdrop-filter`. Only Chromium runs it (WebView2 on Windows); elsewhere the menu keeps a plain blur. Every glass surface carries the rim: a 1px masked gradient edge lit from the top left and the bottom right.
+The window's glass comes from the system (`app/src/ui/native.rs`): `NSGlassEffectView` (Liquid Glass) on macOS 26 and later, vibrancy before, Acrylic on Windows (the system backdrop from Windows 11 22H2, the older composition blur before), none on Linux; `theme.rs` tunes the tint to the material it sits on. GPUI cannot blur what lies under an element inside the window, so the source menu is a near-opaque tint rather than glass.
 
 ## Do's and Don'ts
 

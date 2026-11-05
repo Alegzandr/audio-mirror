@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A rehearsal from any branch: builds and packages the three artifacts
+  # under the version in Cargo.toml, without signing or publishing them.
+  workflow_dispatch:
 
 # Read-only by default; only the publish job can write the release.
 permissions:
@@ -25,9 +28,13 @@ jobs:
       - id: v
         name: Tag, version and branch
         run: |
+          cargo_version=$(grep -m1 '^version' app/Cargo.toml | cut -d '"' -f2)
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           tag="${GITHUB_REF_NAME}"
           version="${tag#v}"
-          cargo_version=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d '"' -f2)
           if [ "$version" != "$cargo_version" ]; then
             echo "::error::Tag $tag does not match version $cargo_version in Cargo.toml"
             exit 1
@@ -68,9 +75,6 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 22
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
@@ -81,35 +85,33 @@ jobs:
         with:
           targets: ${{ matrix.ffmpeg }}
           cache: false
-      - run: npm ci --ignore-scripts
 
       - name: Windows, self-installing executable
         if: matrix.name == 'windows'
         shell: bash
         run: |
-          npx tauri build --no-bundle
+          cargo build --release --locked --manifest-path app/Cargo.toml
           mkdir -p dist
-          cp src-tauri/target/release/audio-mirror.exe "dist/Audio-Mirror_${VERSION}_windows_x64_setup.exe"
+          cp app/target/release/audio-mirror.exe "dist/Audio-Mirror_${VERSION}_windows_x64_setup.exe"
 
       # The AppImage is its own update file.
       - name: Linux, AppImage
         if: matrix.name == 'linux'
         run: |
-          npx tauri build --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          cargo build --release --locked --manifest-path app/Cargo.toml
           mkdir -p dist
-          cp src-tauri/target/release/bundle/appimage/*.AppImage "dist/Audio-Mirror_${VERSION}_linux_x86_64.AppImage"
+          scripts/appimage.sh "dist/Audio-Mirror_${VERSION}_linux_x86_64.AppImage"
 
-      # The update file is the archive the bundler would have made: the .app
+      # The update file is the archive the Tauri bundler made: the .app
       # folder at the top of a gzipped tar, without AppleDouble files.
       - name: macOS, universal app
         if: matrix.name == 'macos'
         run: |
-          npx tauri build --target universal-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
-          mkdir -p dist
-          dir=src-tauri/target/universal-apple-darwin/release/bundle/macos
+          mkdir -p bundle dist
+          scripts/bundle-macos.sh "$VERSION" bundle
           base="dist/Audio-Mirror_${VERSION}_macos_universal"
-          COPYFILE_DISABLE=1 tar -czf "$base.app.tar.gz" -C "$dir" "Audio Mirror.app"
-          ditto -c -k --keepParent "$dir/Audio Mirror.app" "$base.zip"
+          COPYFILE_DISABLE=1 tar -czf "$base.app.tar.gz" -C bundle "Audio Mirror.app"
+          ditto -c -k --keepParent "bundle/Audio Mirror.app" "$base.zip"
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -118,9 +120,11 @@ jobs:
           if-no-files-found: error
 
   # The only job that sees the signing key: a fresh runner that compiles
-  # nothing and runs only the Tauri CLI from the lockfile.
+  # nothing and runs only the signer of the Tauri CLI, pinned by the
+  # lockfile in scripts/sign, whose format every install checks.
   sign:
     name: Sign updates
+    if: github.event_name == 'push'
     needs: [verify, build]
     runs-on: ubuntu-22.04
     env:
@@ -132,7 +136,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
-      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --prefix scripts/sign
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: dist-*
@@ -143,9 +147,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npx tauri signer sign "dist/Audio-Mirror_${VERSION}_windows_x64_setup.exe"
-          npx tauri signer sign "dist/Audio-Mirror_${VERSION}_linux_x86_64.AppImage"
-          npx tauri signer sign "dist/Audio-Mirror_${VERSION}_macos_universal.app.tar.gz"
+          sign=scripts/sign/node_modules/.bin/tauri
+          "$sign" signer sign "dist/Audio-Mirror_${VERSION}_windows_x64_setup.exe"
+          "$sign" signer sign "dist/Audio-Mirror_${VERSION}_linux_x86_64.AppImage"
+          "$sign" signer sign "dist/Audio-Mirror_${VERSION}_macos_universal.app.tar.gz"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release
@@ -154,6 +159,7 @@ jobs:
 
   publish:
     name: Publish release
+    if: github.event_name == 'push'
     needs: [verify, sign]
     runs-on: ubuntu-22.04
     permissions:

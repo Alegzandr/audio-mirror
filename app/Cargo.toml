@@ -1,0 +1,81 @@
+[package]
+name = "audio-mirror"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Mirrors one audio source to several outputs"
+license = "MIT"
+
+[lib]
+name = "audio_mirror_lib"
+
+[build-dependencies]
+winresource = "0.1"
+
+[dependencies]
+gpui = "0.2.2"
+futures = "0.3"
+image = { version = "0.25.1", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+unicode-segmentation = "1"
+auto-launch = "0.5"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+minisign-verify = "0.2"
+semver = "1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+log = { version = "0.4", features = ["std"] }
+dirs = "6"
+sys-locale = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+self-replace = "1.5"
+windows = { version = "0.62", features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.62"
+winreg = "0.55"
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon = "0.21"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-sys = "1.23"
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Shaders compiled at launch: building them needs Xcode's Metal toolchain,
+# a separate download since Xcode 26.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+tar = "0.4"
+flate2 = "1"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSError", "NSGeometry", "NSObject", "NSString"] }
+objc2-screen-capture-kit = { version = "0.3", features = ["block2", "objc2-core-media"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMSampleBuffer"] }
+block2 = "0.6"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

@@ -23,7 +23,7 @@ fi
 mkdir -p "$ROOT/third_party/build"
 ARCHIVE="$ROOT/third_party/build/ffmpeg-$VERSION.tar.xz"
 if [ ! -f "$ARCHIVE" ]; then
-  curl -fsSL --proto '=https' --tlsv1.2 "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$ARCHIVE.part"
+  curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 5 --retry-all-errors "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$ARCHIVE.part"
   mv "$ARCHIVE.part" "$ARCHIVE"
 fi
 if command -v sha256sum >/dev/null 2>&1; then
