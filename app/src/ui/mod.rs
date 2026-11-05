@@ -242,7 +242,20 @@ fn show_panel(anchor: Option<Anchor>, cx: &mut App) {
         .detach();
         return;
     }
-    let anchor = anchor.or_else(native::cursor);
+    // Opened without a click on the icon (launch, second launch, the
+    // menu): next to the icon all the same, as a tray panel should be.
+    // Without it (an icon in the overflow flyout), Windows falls back to the
+    // taskbar corner; macOS uses the pointer, which sits in the menu bar
+    // after a click on the status item.
+    let anchor = anchor
+        .or_else(|| shell.tray.as_ref().and_then(tray::Tray::anchor))
+        .or_else(|| {
+            if cfg!(target_os = "macos") {
+                native::cursor()
+            } else {
+                None
+            }
+        });
     let panel_entity = shell.panel.clone();
     let radius =
         f64::from(theme::Theme::new(gpui::WindowAppearance::Light, native::glass()).radius_window);

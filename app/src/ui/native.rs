@@ -220,6 +220,37 @@ pub fn panel_position(
     }
 }
 
+/// An auto-hidden taskbar leaves the work area as large as the screen, so
+/// a panel placed in it ends under the taskbar once that slides back in.
+/// When the work area covers the screen, this takes the taskbar's own
+/// rectangle (`taskbar`, where it shows) out of it, on the side it sits.
+#[cfg(any(windows, test))]
+pub fn reserve_taskbar(screen: Area, work: Area, taskbar: Area) -> Area {
+    if work != screen {
+        return work;
+    }
+    let (sx2, sy2) = (screen.x + screen.w, screen.y + screen.h);
+    let (tx2, ty2) = (taskbar.x + taskbar.w, taskbar.y + taskbar.h);
+    // Not on this screen.
+    if taskbar.x >= sx2 || tx2 <= screen.x || taskbar.y >= sy2 || ty2 <= screen.y {
+        return work;
+    }
+    let horizontal = taskbar.w >= taskbar.h;
+    let mut w = work;
+    if horizontal && ty2 >= sy2 {
+        w.h = (taskbar.y - screen.y).max(0.0);
+    } else if horizontal {
+        w.y = ty2.min(sy2);
+        w.h = sy2 - w.y;
+    } else if tx2 >= sx2 {
+        w.w = (taskbar.x - screen.x).max(0.0);
+    } else {
+        w.x = tx2.min(sx2);
+        w.w = sx2 - w.x;
+    }
+    w
+}
+
 #[cfg(windows)]
 mod win {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -240,7 +271,19 @@ mod win {
         ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SW_SHOW,
     };
 
-    use super::{panel_position, Anchor, Area, MARGIN};
+    use super::{panel_position, reserve_taskbar, Anchor, Area, MARGIN};
+
+    /// Where the taskbar shows, even while it is auto-hidden.
+    fn taskbar() -> Option<Area> {
+        use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
+        let mut data = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `data` is a sized APPBARDATA the call fills in.
+        let found = unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut data) };
+        (found != 0).then(|| area(data.rc))
+    }
 
     fn hwnd(id: isize) -> HWND {
         HWND(id as *mut _)
@@ -322,7 +365,10 @@ mod win {
             let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
             let scale = f64::from(dpi_x) / 96.0;
             let screen = area(info.rcMonitor);
-            let work = area(info.rcWork);
+            let mut work = area(info.rcWork);
+            if let Some(bar) = taskbar() {
+                work = reserve_taskbar(screen, work, bar);
+            }
             let w = (size.0 * scale).round();
             let h = (size.1 * scale).round();
             // Without an anchor, the usual tray corner.
@@ -578,6 +624,28 @@ mod tests {
         assert_eq!(pos.1, 1080.0 - 560.0 - 12.0);
         let pos = panel_position(SCREEN, SCREEN, (1800.0, 5.0), PANEL_SIZE, 12.0);
         assert_eq!(pos.1, 12.0);
+    }
+
+    #[test]
+    fn an_auto_hidden_taskbar_keeps_its_room() {
+        // Bottom, 48 px: the panel ends above it, not under it.
+        let bar = area(0.0, 1392.0, 2560.0, 48.0);
+        let screen = area(0.0, 0.0, 2560.0, 1440.0);
+        let work = reserve_taskbar(screen, screen, bar);
+        assert_eq!(work, area(0.0, 0.0, 2560.0, 1392.0));
+        let pos = panel_position(screen, work, (2350.0, 1416.0), PANEL_SIZE, 12.0);
+        assert_eq!(pos.1, 1392.0 - 560.0 - 12.0);
+        // Left and top.
+        let left = reserve_taskbar(screen, screen, area(0.0, 0.0, 60.0, 1440.0));
+        assert_eq!(left, area(60.0, 0.0, 2500.0, 1440.0));
+        let top = reserve_taskbar(screen, screen, area(0.0, 0.0, 2560.0, 40.0));
+        assert_eq!(top, area(0.0, 40.0, 2560.0, 1400.0));
+        // A visible taskbar is already out of the work area; another
+        // screen's taskbar is not this one's business.
+        let shown = area(0.0, 0.0, 2560.0, 1392.0);
+        assert_eq!(reserve_taskbar(screen, shown, bar), shown);
+        let other = area(2560.0, 1392.0, 1920.0, 48.0);
+        assert_eq!(reserve_taskbar(screen, screen, other), screen);
     }
 
     #[test]
