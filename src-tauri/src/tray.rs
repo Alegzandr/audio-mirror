@@ -101,7 +101,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 /// "Restart audio": reopens the capture and every output, and reloads the
 /// panel so it reads fresh devices and state.
 fn restart_audio(app: &AppHandle) {
-    app.state::<crate::AppState>().engine.restart();
+    app.state::<crate::AppState>().restart_engine();
     if let Some(panel) = app.get_webview_window(PANEL) {
         let _ = panel.reload();
     }

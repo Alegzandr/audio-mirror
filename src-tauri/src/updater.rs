@@ -95,25 +95,22 @@ impl Failure {
     }
 }
 
-fn failed_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|d| d.join(FAILED_FILE))
+fn failed_path() -> Option<PathBuf> {
+    crate::paths::config_dir().map(|d| d.join(FAILED_FILE))
 }
 
 fn failed_version(app: &AppHandle) -> Option<String> {
     if let Some(v) = app.state::<SplashState>().failed.lock().clone() {
         return Some(v);
     }
-    let text = std::fs::read_to_string(failed_path(app)?).ok()?;
+    let text = std::fs::read_to_string(failed_path()?).ok()?;
     Some(text.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
 /// Remembers the version that failed to install, or forgets it with `None`.
 fn set_failed(app: &AppHandle, version: Option<&str>) {
     *app.state::<SplashState>().failed.lock() = version.map(str::to_owned);
-    let Some(path) = failed_path(app) else {
+    let Some(path) = failed_path() else {
         return;
     };
     let result = match version {

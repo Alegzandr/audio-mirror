@@ -238,6 +238,7 @@ name = "audio-mirror"
 version = "0.4.3"
 dependencies = [
  "block2",
+ "dirs 6.0.0",
  "libpulse-sys",
  "log",
  "objc2",

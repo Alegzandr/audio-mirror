@@ -4,70 +4,22 @@ mod glass;
 mod i18n;
 #[cfg(windows)]
 mod install;
+mod paths;
+mod state;
 mod tray;
 mod updater;
 
-use std::path::PathBuf;
-
-use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
-use audio::{DeviceList, Engine, Status};
+use audio::{DeviceList, Status};
 use config::AppConfig;
 use i18n::Lang;
+pub(crate) use state::AppState;
 
 /// Argument passed by the login item: start in the tray, panel hidden.
 const AUTOSTART_ARG: &str = "--autostart";
-
-pub(crate) struct AppState {
-    config: Mutex<AppConfig>,
-    /// Held while the settings are written, see [`AppState::change`].
-    writing: Mutex<()>,
-    path: PathBuf,
-    engine: Engine,
-    pub(crate) lang: Lang,
-    /// Version already installed and waiting for a restart.
-    pub(crate) update_ready: Mutex<Option<String>>,
-}
-
-impl AppState {
-    /// Changes the settings, writes them, and hands `apply` the result.
-    ///
-    /// The file is written with the settings unlocked, so the panel reading
-    /// them, a volume going to the audio thread, and the next command do not
-    /// queue behind a disk that answers slowly, which a roaming or networked
-    /// profile directory does. `writing` takes the place of that lock for
-    /// the writers alone: it is taken first and held across the write, so
-    /// two changes reach the file in the order they were made.
-    fn change<T>(
-        &self,
-        f: impl FnOnce(&mut AppConfig) -> T,
-        apply: impl FnOnce(&AppConfig, T),
-    ) -> Result<(), String> {
-        let _writing = self.writing.lock();
-        let (cfg, value) = {
-            let mut cfg = self.config.lock();
-            let value = f(&mut cfg);
-            (cfg.clone(), value)
-        };
-        // The change is already in memory, so it reaches the engine even when
-        // the file cannot be written: otherwise the panel would show a mute
-        // or an output the audio never got. The next change saves it again.
-        let saved = cfg.save(&self.path);
-        apply(&cfg, value);
-        if let Err(e) = saved {
-            log::error!("settings not saved: {e}");
-        }
-        Ok(())
-    }
-
-    /// Applies a change, saves it and pushes it to the engine.
-    fn update(&self, f: impl FnOnce(&mut AppConfig)) -> Result<(), String> {
-        self.change(f, |cfg, ()| self.engine.apply(cfg.engine_config()))
-    }
-}
 
 #[derive(Serialize)]
 struct Snapshot {
@@ -86,7 +38,7 @@ async fn snapshot(app: AppHandle, state: State<'_, AppState>) -> Result<Snapshot
         .map_err(|e| e.to_string())?;
     Ok(Snapshot {
         version: app.package_info().version.to_string(),
-        config: state.config.lock().clone(),
+        config: state.config(),
         devices,
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         update_ready: state.update_ready.lock().clone(),
@@ -95,7 +47,7 @@ async fn snapshot(app: AppHandle, state: State<'_, AppState>) -> Result<Snapshot
 
 #[tauri::command]
 fn status(state: State<'_, AppState>) -> Status {
-    state.engine.status()
+    state.status()
 }
 
 /// Longest id or name a command accepts. Device ids are far shorter; the
@@ -112,7 +64,8 @@ fn check_len(args: &[&str]) -> Result<(), String> {
 #[tauri::command]
 fn set_source(state: State<'_, AppState>, id: String) -> Result<(), String> {
     check_len(&[&id])?;
-    state.update(|c| c.source = id)
+    state.set_source(id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -123,7 +76,8 @@ fn set_output_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     check_len(&[&id, &name])?;
-    state.update(|c| c.output_mut(&id, &name).enabled = enabled)
+    state.set_output_enabled(&id, &name, enabled);
+    Ok(())
 }
 
 #[tauri::command]
@@ -135,23 +89,8 @@ fn set_output_volume(
     persist: bool,
 ) -> Result<(), String> {
     check_len(&[&id, &name])?;
-    let fader = if fader.is_finite() {
-        fader.clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    // Volume goes straight to the audio thread, the stream is not rebuilt.
-    // While the slider moves, only the final position is written to disk.
-    let gain = audio::volume::fader_to_gain(fader);
-    if !persist {
-        state.config.lock().output_mut(&id, &name).fader = fader;
-        state.engine.set_gain(&id, gain);
-        return Ok(());
-    }
-    state.change(
-        |c| c.output_mut(&id, &name).fader = fader,
-        |_, ()| state.engine.set_gain(&id, gain),
-    )
+    state.set_output_volume(&id, &name, fader, persist);
+    Ok(())
 }
 
 #[tauri::command]
@@ -162,10 +101,8 @@ fn set_output_muted(
     muted: bool,
 ) -> Result<(), String> {
     check_len(&[&id, &name])?;
-    state.change(
-        |c| c.output_mut(&id, &name).muted = muted,
-        |_, ()| state.engine.set_muted(&id, muted),
-    )
+    state.set_output_muted(&id, &name, muted);
+    Ok(())
 }
 
 /// One line of the source menu: a source, or a group header when `id` is None.
@@ -269,7 +206,7 @@ fn quit(app: AppHandle) {
 /// is done.
 pub(crate) fn start(app: &AppHandle) {
     let state = app.state::<AppState>();
-    state.engine.apply(state.config.lock().engine_config());
+    state.start_engine();
 
     // An install moved the executable: point the login item at the new path.
     let launcher = app.autolaunch();
@@ -346,17 +283,9 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             // Start at login is opt-in: the user turns it on in the panel.
-            let path = config::config_path(app.path().app_config_dir()?);
-            let config = AppConfig::load(&path);
-
-            app.manage(AppState {
-                config: Mutex::new(config),
-                writing: Mutex::new(()),
-                path,
-                engine: Engine::new(),
-                lang,
-                update_ready: Mutex::new(None),
-            });
+            let dir = paths::config_dir().ok_or("no settings folder")?;
+            let path = config::config_path(dir);
+            app.manage(AppState::new(path, lang));
             app.manage(updater::SplashState::default());
 
             if updater::enabled() {
