@@ -32,7 +32,22 @@ mod imp {
     use crate::ui::AppEvent;
 
     pub struct Tray {
-        _icon: TrayIcon,
+        icon: TrayIcon,
+    }
+
+    impl Tray {
+        /// The middle of the icon, in physical pixels, where Windows tells
+        /// it. macOS places the panel from the pointer instead (`native.rs`).
+        pub fn anchor(&self) -> Option<Anchor> {
+            if !cfg!(windows) {
+                return None;
+            }
+            let rect = self.icon.rect().filter(|r| r.size.width > 0)?;
+            Some(Anchor {
+                x: rect.position.x + f64::from(rect.size.width) / 2.0,
+                y: rect.position.y + f64::from(rect.size.height) / 2.0,
+            })
+        }
     }
 
     pub fn setup(lang: Lang, events: UnboundedSender<AppEvent>) -> Result<Tray, String> {
@@ -93,7 +108,7 @@ mod imp {
             };
             let _ = events.unbounded_send(event);
         }));
-        Ok(Tray { _icon: tray })
+        Ok(Tray { icon: tray })
     }
 }
 
@@ -109,6 +124,13 @@ mod imp {
 
     pub struct Tray {
         _handle: ksni::blocking::Handle<Item>,
+    }
+
+    impl Tray {
+        /// StatusNotifierItem does not say where the icon is.
+        pub fn anchor(&self) -> Option<crate::ui::native::Anchor> {
+            None
+        }
     }
 
     pub struct Item {
@@ -180,6 +202,12 @@ mod imp {
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod imp {
     pub struct Tray;
+
+    impl Tray {
+        pub fn anchor(&self) -> Option<crate::ui::native::Anchor> {
+            None
+        }
+    }
 
     pub fn setup(
         _lang: crate::i18n::Lang,
