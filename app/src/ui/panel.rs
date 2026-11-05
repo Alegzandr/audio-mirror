@@ -37,7 +37,9 @@ actions!(panel, [HidePanel, FocusNext, FocusPrev]);
 const CONTEXT: &str = "Panel";
 /// Logical size of the panel window.
 pub const SIZE: (f64, f64) = (380.0, 560.0);
-const STATUS_POLL: Duration = Duration::from_millis(100);
+/// How often the panel reads the engine: 30 times a second, so the meters
+/// get a new peak about every other frame. Only while the panel is open.
+const STATUS_POLL: Duration = Duration::from_millis(33);
 /// How far an arrow key moves a fader.
 const FADER_STEP: f32 = 0.05;
 /// Width of the volume capsule's invisible thumb, as the range input had.
@@ -138,6 +140,8 @@ pub struct Panel {
     /// One per output row, so the keyboard can reach each fader.
     row_focus: HashMap<String, FocusHandle>,
     opens: usize,
+    /// When the meters last moved, to step them by the time elapsed.
+    meters_at: Option<std::time::Instant>,
     icon: Arc<Image>,
     poll: Option<Task<()>>,
     window_subscriptions: Vec<Subscription>,
@@ -178,6 +182,7 @@ impl Panel {
             picker_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             row_focus: HashMap::new(),
             opens: 0,
+            meters_at: None,
             icon: Arc::new(Image::from_bytes(
                 ImageFormat::Png,
                 assets::APP_ICON.to_vec(),
@@ -657,14 +662,22 @@ impl Render for Panel {
         let t = Theme::new(window.appearance(), native::glass());
         let lang = self.lang;
 
-        // Meters: instant peak, smooth fall, one step per frame.
+        // Meters: eased rise, steady fall, by the time since the last frame
+        // (capped, so a panel shown again does not jump).
+        let now = std::time::Instant::now();
+        let dt = self
+            .meters_at
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
         let mut moving = false;
         for m in std::iter::once(&mut self.source_meter).chain(self.meters.values_mut()) {
-            m.level = view::meter_fall(m.level, m.target);
-            moving |= m.level > 0.0;
+            m.level = view::meter_step(m.level, m.target, dt);
+            moving |= m.level != m.target || m.level > 0.0;
         }
         if moving {
+            self.meters_at = Some(now);
             window.request_animation_frame();
+        } else {
+            self.meters_at = None;
         }
 
         let rows = self.rows();

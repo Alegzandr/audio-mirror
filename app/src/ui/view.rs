@@ -13,8 +13,12 @@ use crate::i18n::Lang;
 const DESKTOP_PREFIX: &str = "Default output";
 /// Bottom of the meters, in dB.
 const FLOOR_DB: f32 = -60.0;
-/// How far a meter falls per frame, once the peak has passed.
-const FALL: f32 = 0.02;
+/// How fast a meter rises to a new peak: the time constant of the approach,
+/// in seconds. Short enough to read as instant, long enough not to jump.
+const ATTACK: f32 = 0.03;
+/// How fast a meter falls once the peak has passed, in full scales per
+/// second: 1.2 is 72 dB/s, a steady speed in dB as on a hardware meter.
+const FALL_PER_SECOND: f32 = 1.2;
 /// Bottom of the OBS fader range, `LOG_RANGE_DB` in `volume.rs`.
 const LOG_RANGE_DB: f32 = 96.0;
 const MINUS: char = '\u{2212}';
@@ -59,13 +63,21 @@ pub fn meter_target(peak: f32) -> f32 {
     ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
 }
 
-/// The next position of a meter: peaks are taken at once, the fall is
-/// smoothed so a meter does not flicker between two frames.
-pub fn meter_fall(level: f32, target: f32) -> f32 {
+/// Where a meter stands `dt` seconds later: it eases up to a peak and falls
+/// back at a steady speed. Worked out from the time elapsed, not per frame,
+/// so it moves alike at any frame rate.
+pub fn meter_step(level: f32, target: f32, dt: f32) -> f32 {
+    let dt = dt.max(0.0);
     if target > level {
-        target
+        let next = level + (target - level) * (1.0 - (-dt / ATTACK).exp());
+        // Close enough: land on the peak instead of creeping toward it.
+        if target - next < 0.002 {
+            target
+        } else {
+            next
+        }
     } else {
-        target.max(level - FALL)
+        target.max(level - FALL_PER_SECOND * dt)
     }
 }
 
@@ -326,9 +338,23 @@ mod tests {
         assert_eq!(meter_target(0.0), 0.0);
         assert!((meter_target(0.5) - 0.9).abs() < 0.01);
         assert_eq!(meter_target(1e-9), 0.0);
-        assert_eq!(meter_fall(0.2, 0.9), 0.9);
-        assert!(meter_fall(0.9, 0.0) < 0.9 && meter_fall(0.9, 0.0) > 0.8);
-        assert_eq!(meter_fall(0.005, 0.0), 0.0);
+        // A peak is reached within a few frames, without a jump.
+        let frame = 1.0 / 60.0;
+        let first = meter_step(0.2, 0.9, frame);
+        assert!(first > 0.2 && first < 0.9, "no jump: {first}");
+        let mut level = 0.2;
+        for _ in 0..12 {
+            level = meter_step(level, 0.9, frame);
+        }
+        assert_eq!(level, 0.9, "reached in 200 ms");
+        // The fall goes by time: two half frames are one frame.
+        let one = meter_step(0.9, 0.0, frame);
+        let two = meter_step(meter_step(0.9, 0.0, frame / 2.0), 0.0, frame / 2.0);
+        assert!((one - two).abs() < 1e-6);
+        assert!(one < 0.9 && one > 0.85);
+        // It settles on the target, never under.
+        assert_eq!(meter_step(0.005, 0.0, frame), 0.0);
+        assert_eq!(meter_step(0.5, 0.5, frame), 0.5);
         assert_eq!(meter_db(0.0), f32::NEG_INFINITY);
         assert_eq!(meter_db(1.0), 0.0);
         assert!((meter_db(meter_target(0.5)) - peak_to_db(0.5)).abs() < 0.001);
