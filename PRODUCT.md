@@ -8,7 +8,7 @@ desktop
 
 ## Stack
 
-Rust, with the interface drawn in [GPUI](https://www.gpui.rs) (`app/src/ui`). No component library: the interface is a single tray panel, and its controls are drawn by hand after `DESIGN.md`.
+Rust, with the interface drawn in [Slint](https://slint.dev) (`app/src/ui/panel.slint`), under Slint's royalty-free license, which asks for the "Made with Slint" badge in the README. No component library: the interface is a single tray panel, and its controls are drawn by hand after `DESIGN.md`.
 
 ## Users
 

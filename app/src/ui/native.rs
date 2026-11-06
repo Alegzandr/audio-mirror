@@ -1,18 +1,39 @@
-//! What GPUI does not do for a tray panel, done on the native window.
+//! What Slint does not do for a tray panel, done on the native window.
 //!
 //! The material behind the panel: on macOS 26 and later the real Liquid
-//! Glass (`NSGlassEffectView`) is put under GPUI's view; older macOS and
-//! Windows get GPUI's own blurred background (vibrancy, Acrylic); Linux has
-//! none and the panel paints an opaque ground. Placement is done here too,
-//! in the system's own units: GPUI positions windows in logical pixels of
-//! one display, which lands wrong across displays of different scales.
+//! Glass (`NSGlassEffectView`), vibrancy before; Acrylic on Windows; Linux
+//! has none and the panel paints an opaque ground. Placement is done here
+//! too, in the system's own units, which stays right across displays of
+//! different scales.
 
-use gpui::{Window, WindowBackgroundAppearance};
 use raw_window_handle::HasWindowHandle;
 #[cfg(any(windows, target_os = "macos"))]
 use raw_window_handle::RawWindowHandle;
 
-use super::theme::Glass;
+/// What the panel sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Glass {
+    /// `NSGlassEffectView`, macOS 26 and later: it carries its own tint.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Liquid,
+    /// Vibrancy (older macOS) or Acrylic (Windows).
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    Native,
+    /// No system material (Linux): the tint becomes an opaque ground.
+    #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+    None,
+}
+
+impl Glass {
+    /// The value `Platform.glass` takes in `panel.slint`.
+    pub fn code(self) -> i32 {
+        match self {
+            Glass::Liquid => 0,
+            Glass::Native => 1,
+            Glass::None => 2,
+        }
+    }
+}
 
 /// Gap between the panel and the taskbar or menu bar, in logical pixels.
 pub const MARGIN: f64 = 12.0;
@@ -37,20 +58,6 @@ pub fn glass() -> Glass {
     }
 }
 
-/// The background GPUI is asked for. Liquid Glass, and the system backdrop
-/// of Windows 11, are added under a transparent window instead; GPUI's own
-/// blur covers older Windows and macOS.
-pub fn background() -> WindowBackgroundAppearance {
-    #[cfg(windows)]
-    if win::system_backdrop() {
-        return WindowBackgroundAppearance::Transparent;
-    }
-    match glass() {
-        Glass::Native => WindowBackgroundAppearance::Blurred,
-        Glass::Liquid | Glass::None => WindowBackgroundAppearance::Transparent,
-    }
-}
-
 /// Where the user clicked to open the panel, in the system's screen units
 /// (physical pixels on Windows, points on macOS).
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -61,19 +68,15 @@ pub struct Anchor {
 }
 
 /// A window's native handle (`HWND`, or the `NSView` on macOS), copied out
-/// of GPUI.
-///
-/// What is done to it here makes the system call back into GPUI at once
-/// (a move, a focus change), so it must run while GPUI holds nothing: from
-/// a task between two awaits, never inside an update of the app or of a
-/// window. Main thread only.
+/// of Slint once the window exists. Main thread only.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeWindow(usize);
 
 impl NativeWindow {
-    pub fn of(window: &Window) -> Option<Self> {
-        match HasWindowHandle::window_handle(window).ok()?.as_raw() {
+    pub fn of(window: &slint::Window) -> Option<Self> {
+        let handle = window.window_handle();
+        match HasWindowHandle::window_handle(&handle).ok()?.as_raw() {
             #[cfg(windows)]
             RawWindowHandle::Win32(h) => Some(NativeWindow(h.hwnd.get() as usize)),
             #[cfg(target_os = "macos")]
@@ -127,7 +130,33 @@ impl NativeWindow {
 }
 
 #[cfg(windows)]
-pub use win::{click_outside, is_foreground};
+pub use win::{click_outside, is_foreground, owner, system_backdrop};
+
+/// Where a window of `size` (logical) is centered on the main display, in
+/// physical pixels, where the system says so before the window exists.
+pub fn centered(size: (f64, f64)) -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        win::centered(size)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = size;
+        None
+    }
+}
+
+/// Makes the system set up OLE on this thread, in the single-threaded
+/// apartment winit needs for its windows. The audio engine asks for the
+/// multithreaded one on every thread it touches; done first, this keeps
+/// that request from taking the main thread.
+pub fn init_ui_thread() {
+    #[cfg(windows)]
+    // SAFETY: called once, on the main thread, before any window.
+    unsafe {
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
+    }
+}
 
 /// Where the pointer is, as an anchor when the tray gives none.
 pub fn cursor() -> Option<Anchor> {
@@ -149,7 +178,7 @@ pub fn cursor() -> Option<Anchor> {
 /// Makes the app a menu bar accessory: no Dock icon, no app menu.
 pub fn accessory_app() {
     #[cfg(target_os = "macos")]
-    // SAFETY: NSApp exists once GPUI runs, and this runs on the main thread.
+    // SAFETY: NSApp exists once the event loop runs, and this runs on the main thread.
     unsafe {
         mac::accessory_app()
     };
@@ -254,21 +283,16 @@ pub fn reserve_taskbar(screen: Area, work: Area, taskbar: Area) -> Area {
 #[cfg(windows)]
 mod win {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
-    use windows::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW,
-        DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-        DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
-    };
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         MONITOR_DEFAULTTOPRIMARY,
     };
-    use windows::Win32::UI::Controls::MARGINS;
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetForegroundWindow, GetWindowRect, SetForegroundWindow, SetWindowPos,
-        ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SW_SHOW,
+        CreateWindowExW, GetCursorPos, GetForegroundWindow, GetWindowRect, SetForegroundWindow,
+        SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SW_SHOW, WINDOW_EX_STYLE, WS_POPUP,
     };
 
     use super::{panel_position, reserve_taskbar, Anchor, Area, MARGIN};
@@ -291,7 +315,7 @@ mod win {
 
     /// Windows 11 22H2 and later draw Acrylic themselves under a window
     /// (`DWMSBT_TRANSIENTWINDOW`), with a stronger blur than the older
-    /// composition attribute GPUI uses.
+    /// composition blur (`blur_behind`).
     pub fn system_backdrop() -> bool {
         static BUILD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
         let build = *BUILD.get_or_init(|| {
@@ -305,32 +329,115 @@ mod win {
         build >= 22621
     }
 
+    /// The corners and the Acrylic of Windows 11 22H2 and later come with
+    /// the window (`ui::window_attributes`); older systems get the
+    /// composition blur here.
     pub fn prepare(id: isize) {
-        let pref: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
-        // SAFETY: a live window of this process, and values of the sizes given.
+        if !system_backdrop() {
+            blur_behind(id);
+        }
+    }
+
+    /// A hidden window that owns the app's windows: an owned window is a
+    /// pop-up with no taskbar button and no place in Alt+Tab, as a tray
+    /// panel should be. Created once, on the main thread.
+    pub fn owner() -> Option<isize> {
+        thread_local! {
+            static OWNER: Option<isize> = {
+                // SAFETY: a plain hidden window of a system class.
+                unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        windows::core::w!("STATIC"),
+                        windows::core::w!("Audio Mirror"),
+                        WS_POPUP,
+                        0,
+                        0,
+                        0,
+                        0,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                .ok()
+                .map(|h| h.0 as isize)
+            };
+        }
+        OWNER.with(|o| *o)
+    }
+
+    /// Before Windows 11 22H2: the composition blur behind the window, set
+    /// through `SetWindowCompositionAttribute`, which user32 exports without
+    /// declaring it.
+    fn blur_behind(id: isize) {
+        #[repr(C)]
+        struct AccentPolicy {
+            state: u32,
+            flags: u32,
+            gradient: u32,
+            animation: u32,
+        }
+        #[repr(C)]
+        struct CompositionData {
+            attribute: u32,
+            data: *mut std::ffi::c_void,
+            size: usize,
+        }
+        type SetAttribute = unsafe extern "system" fn(HWND, *mut CompositionData) -> i32;
+        /// `ACCENT_ENABLE_BLURBEHIND`.
+        const BLUR_BEHIND: u32 = 3;
+        /// `WCA_ACCENT_POLICY`.
+        const ACCENT_POLICY: u32 = 19;
+        // SAFETY: user32 is loaded in every GUI process; the function is
+        // called with the layout it has had since Windows 10.
         unsafe {
-            let _ = DwmSetWindowAttribute(
-                hwnd(id),
-                DWMWA_WINDOW_CORNER_PREFERENCE,
-                &pref as *const _ as *const _,
-                std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
-            );
-            if system_backdrop() {
-                let margins = MARGINS {
-                    cxLeftWidth: -1,
-                    cxRightWidth: -1,
-                    cyTopHeight: -1,
-                    cyBottomHeight: -1,
-                };
-                let _ = DwmExtendFrameIntoClientArea(hwnd(id), &margins);
-                let backdrop: DWM_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW;
-                let _ = DwmSetWindowAttribute(
-                    hwnd(id),
-                    DWMWA_SYSTEMBACKDROP_TYPE,
-                    &backdrop as *const _ as *const _,
-                    std::mem::size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
-                );
+            let Ok(user32) = GetModuleHandleW(windows::core::w!("user32.dll")) else {
+                return;
+            };
+            let Some(f) =
+                GetProcAddress(user32, windows::core::s!("SetWindowCompositionAttribute"))
+            else {
+                return;
+            };
+            let f: SetAttribute = std::mem::transmute(f);
+            let mut policy = AccentPolicy {
+                state: BLUR_BEHIND,
+                flags: 0,
+                gradient: 0,
+                animation: 0,
+            };
+            let mut data = CompositionData {
+                attribute: ACCENT_POLICY,
+                data: &mut policy as *mut _ as *mut _,
+                size: std::mem::size_of::<AccentPolicy>(),
+            };
+            f(hwnd(id), &mut data);
+        }
+    }
+
+    /// Where a window of `size` (logical) sits centered on the main display,
+    /// in physical pixels.
+    pub fn centered(size: (f64, f64)) -> Option<(i32, i32)> {
+        // SAFETY: plain Win32 queries.
+        unsafe {
+            let monitor = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return None;
             }
+            let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
+            let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+            let scale = f64::from(dpi_x) / 96.0;
+            let work = area(info.rcWork);
+            Some((
+                (work.x + (work.w - size.0 * scale) / 2.0).round() as i32,
+                (work.y + (work.h - size.1 * scale) / 2.0).round() as i32,
+            ))
         }
     }
 
@@ -446,6 +553,12 @@ mod mac {
     const BELOW: isize = -1;
     /// `NSApplicationActivationPolicyAccessory`.
     const ACCESSORY: isize = 1;
+    /// `NSVisualEffectMaterialPopover`.
+    const POPOVER: isize = 6;
+    /// `NSVisualEffectBlendingModeBehindWindow`.
+    const BEHIND_WINDOW: isize = 0;
+    /// `NSVisualEffectStateActive`.
+    const ACTIVE: isize = 1;
 
     fn glass_class() -> Option<&'static AnyClass> {
         AnyClass::get(c"NSGlassEffectView")
@@ -461,18 +574,14 @@ mod mac {
         msg_send![view, window]
     }
 
-    /// Hides the window buttons GPUI's titled panel carries, rounds the
-    /// content, and lays Liquid Glass under it where the system has it.
+    /// Rounds the window and lays the system material under the panel:
+    /// Liquid Glass where the system has it, vibrancy before. winit needs
+    /// its own view to stay the window's content view, so the material goes
+    /// into the frame view, right under it.
     pub unsafe fn prepare(view: *mut c_void, radius: f64) {
         let Some(window) = window_of(view) else {
             return;
         };
-        for button in 0isize..3 {
-            let b: Option<Retained<AnyObject>> = msg_send![&*window, standardWindowButton: button];
-            if let Some(b) = b {
-                let _: () = msg_send![&*b, setHidden: true];
-            }
-        }
         let content: Option<Retained<AnyObject>> = msg_send![&*window, contentView];
         let Some(content) = content else {
             return;
@@ -483,19 +592,40 @@ mod mac {
             let _: () = msg_send![&*layer, setCornerRadius: radius];
             let _: () = msg_send![&*layer, setMasksToBounds: true];
         }
-        if let Some(cls) = glass_class() {
-            let bounds: NSRect = msg_send![&*content, bounds];
+        let frame_view: Option<Retained<AnyObject>> = msg_send![&*content, superview];
+        let Some(frame_view) = frame_view else {
+            return;
+        };
+        let bounds: NSRect = msg_send![&*content, frame];
+        let material: Retained<AnyObject> = if let Some(cls) = glass_class() {
             let glass: Allocated<AnyObject> = msg_send![cls, alloc];
             let glass: Retained<AnyObject> = msg_send![glass, initWithFrame: bounds];
             let _: () = msg_send![&*glass, setCornerRadius: radius];
-            let _: () = msg_send![&*glass, setAutoresizingMask: RESIZE_WITH_PARENT];
-            let _: () = msg_send![
-                &*content,
-                addSubview: &*glass,
-                positioned: BELOW,
-                relativeTo: Option::<&AnyObject>::None
-            ];
-        }
+            glass
+        } else {
+            let Some(cls) = AnyClass::get(c"NSVisualEffectView") else {
+                return;
+            };
+            let effect: Allocated<AnyObject> = msg_send![cls, alloc];
+            let effect: Retained<AnyObject> = msg_send![effect, initWithFrame: bounds];
+            let _: () = msg_send![&*effect, setMaterial: POPOVER];
+            let _: () = msg_send![&*effect, setBlendingMode: BEHIND_WINDOW];
+            let _: () = msg_send![&*effect, setState: ACTIVE];
+            let _: () = msg_send![&*effect, setWantsLayer: true];
+            let layer: Option<Retained<AnyObject>> = msg_send![&*effect, layer];
+            if let Some(layer) = layer {
+                let _: () = msg_send![&*layer, setCornerRadius: radius];
+                let _: () = msg_send![&*layer, setMasksToBounds: true];
+            }
+            effect
+        };
+        let _: () = msg_send![&*material, setAutoresizingMask: RESIZE_WITH_PARENT];
+        let _: () = msg_send![
+            &*frame_view,
+            addSubview: &*material,
+            positioned: BELOW,
+            relativeTo: &*content
+        ];
         // The shadow follows the new, rounded shape.
         let _: () = msg_send![&*window, invalidateShadow];
     }

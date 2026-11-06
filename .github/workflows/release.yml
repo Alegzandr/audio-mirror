@@ -181,6 +181,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "Audio Mirror $VERSION" \
+            --notes "[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev)" \
             --generate-notes \
             --verify-tag \
             dist/*

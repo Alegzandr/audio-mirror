@@ -11,6 +11,10 @@
 </p>
 
 <p align="center">
+  <a href="https://slint.dev"><img alt="Made with Slint" src="https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png" height="60"></a>
+</p>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/panel-dark.png">
     <img alt="The Audio Mirror panel: the default output is mirrored to headphones and a virtual cable, each with its own volume slider and mute button" src="docs/images/panel-light.png" width="380">
@@ -236,7 +240,7 @@ Code layout, in `app/src/audio`:
 
 ## Development
 
-Audio Mirror is written in Rust: the audio engine in `app/src/audio`, and the tray and panel drawn with [GPUI](https://www.gpui.rs), Zed's UI framework, in `app/src/ui`.
+Audio Mirror is written in Rust: the audio engine in `app/src/audio`, and the tray and panel drawn with [Slint](https://slint.dev) in `app/src/ui`.
 
 Requirements: Rust (stable) and FFmpeg's libavutil and libswresample as static libraries:
 
@@ -269,7 +273,7 @@ git push origin v0.2.0
 
 ### Signing key
 
-Updates are verified with a minisign key, in the encoding of Tauri's updater, which installs made before the GPUI rewrite still use. The public key is `PUBKEY` in `app/src/updater.rs`. The private key never enters the repository; the release workflow reads it from two repository secrets:
+Updates are verified with a minisign key, in the encoding of Tauri's updater, which installs made with Tauri still use. The public key is `PUBKEY` in `app/src/updater.rs`. The private key never enters the repository; the release workflow reads it from two repository secrets:
 
 - `TAURI_SIGNING_PRIVATE_KEY`: content of the private key file
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: its password

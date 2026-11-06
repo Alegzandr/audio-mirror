@@ -115,7 +115,7 @@ Neutrals are translucent inks and fills, so they take the color of the glass und
 
 ## Typography
 
-SF Pro on macOS (`.SystemUIFont`), left to the system. Everywhere else the bundled Inter variable font (`app/assets/fonts`, SIL OFL), since SF Pro's license keeps it on Apple platforms; Inter gets heavier weights (430/530/620) to make up for ClearType drawing it thinner. GPUI sets no letter spacing, so SF Pro's tracking table is not applied to Inter. 13px body, 12px group headings and output states, 15px semibold title. Device names are semibold. Tabular numerals everywhere so dB values hold still.
+SF Pro on macOS (`.SystemUIFont`), left to the system. Everywhere else the bundled Inter variable font (`app/assets/fonts`, SIL OFL), since SF Pro's license keeps it on Apple platforms; Inter gets heavier weights (430/530/620) to make up for ClearType drawing it thinner. Slint sets no letter spacing, so SF Pro's tracking table is not applied to Inter. 13px body, 12px group headings and output states, 15px semibold title. Device names are semibold. Slint cannot turn on OpenType features, so numerals are the font's default ones; dB values sit right-aligned in a fixed width so they hold their place.
 
 ## Layout
 
@@ -142,11 +142,11 @@ Window 18px (8px on Windows, which rounds undecorated windows itself), platters 
 
 ## Motion
 
-SwiftUI's springs, `.smooth`, `.snappy` and `.bouncy` (0.5 s; bounce 0, 0.15, 0.3), computed in closed form (`spring` in `app/src/ui/widgets.rs`). The panel's header and footer settle in on `.snappy` when it opens (position and opacity only, the window and its glass appear at once since the system shows them), the source menu fades in on `.snappy`, the switch knob crosses on `.bouncy`, the other devices unfold in a short stagger only when the user unfolds them. GPUI cannot scale an element, so pressed buttons and a held capsule do not shrink or swell.
+SwiftUI's springs, `.smooth`, `.snappy` and `.bouncy` (0.5 s; bounce 0, 0.15, 0.3), as Slint's `spring()` easing (`app/src/ui/panel.slint`). The panel's header and footer settle in on `.snappy` when it opens (position and opacity only, the window and its glass appear at once since the system shows them), the source menu fades in, the switch knob crosses on `.bouncy`, the other devices unfold in a short stagger only when the user unfolds them. Pressed buttons and a held capsule do not shrink or swell.
 
 ## Glass
 
-The window's glass comes from the system (`app/src/ui/native.rs`): `NSGlassEffectView` (Liquid Glass) on macOS 26 and later, vibrancy before, Acrylic on Windows (the system backdrop from Windows 11 22H2, the older composition blur before), none on Linux; `theme.rs` tunes the tint to the material it sits on. GPUI cannot blur what lies under an element inside the window, so the source menu is a near-opaque tint rather than glass.
+The window's glass comes from the system (`app/src/ui/native.rs`): `NSGlassEffectView` (Liquid Glass) on macOS 26 and later, vibrancy before, Acrylic on Windows (the system backdrop from Windows 11 22H2, the older composition blur before), none on Linux; the `Theme` global in `panel.slint` tunes the tint to the material it sits on. Slint cannot blur what lies under an element inside the window, so the source menu is a near-opaque tint rather than glass.
 
 ## Do's and Don'ts
 
