@@ -40,9 +40,9 @@ pub fn run() {
         return;
     };
     let path = config::config_path(dir);
-    // Built once the UI runs: on Windows the engine registers for device
-    // changes on this thread, which must find COM already set up the way
-    // the windows need it (OLE, single-threaded).
+    // Built once the UI has set this thread up: on Windows the engine
+    // registers for device changes on it, which must find COM already set
+    // up the way the windows need it (OLE, single-threaded).
     let state = move || Arc::new(AppState::new(path, Lang::detect()));
     ui::run(state, events, incoming);
 }

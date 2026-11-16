@@ -1,0 +1,1206 @@
+// The panel and the update splash, drawn as a Control Center module
+// (`DESIGN.md`). Everything shown comes from Rust (`panel.rs`, `view.rs`);
+// this file only lays it out, draws it and reports what the user does.
+
+import { Palette } from "std-widgets.slint";
+import "../../assets/fonts/InterVariable.ttf";
+
+export struct OutputRow {
+    id: string,
+    name: string,
+    state: string,
+    error: bool,
+    detail: string,
+    fader: float,
+    muted: bool,
+    db: string,
+    can-rename: bool,
+}
+
+export struct OtherRow {
+    id: string,
+    name: string,
+}
+
+export struct MenuEntry {
+    id: string,
+    label: string,
+    header: bool,
+    checked: bool,
+}
+
+/// The words the layout itself shows; the rest comes with the data.
+export struct Texts {
+    source: string,
+    outputs: string,
+    edit: string,
+    done: string,
+    rename: string,
+    remove: string,
+    add: string,
+    show: string,
+    hide: string,
+    autostart: string,
+    quit: string,
+    update: string,
+    version: string,
+}
+
+/// What the system gives the panel, set once from Rust (`native.rs`).
+export global Platform {
+    /// 0: Liquid Glass (macOS 26+), 1: vibrancy or Acrylic, 2: none (Linux).
+    in property <int> glass: 2;
+    /// Empty on macOS: the system font (SF Pro).
+    in property <string> font-family;
+    /// Windows rounds undecorated windows itself, with a smaller radius.
+    in property <length> radius: 18px;
+    /// Inter gets heavier weights than SF Pro, to make up for ClearType
+    /// drawing it thinner.
+    in property <int> regular: 430;
+    in property <int> medium: 530;
+    in property <int> semibold: 620;
+}
+
+/// Design tokens (`DESIGN.md`): translucent inks and fills over the glass,
+/// one system blue, one red.
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> tint: Platform.glass == 0
+        ? (dark ? rgba(28, 28, 30, 0.22) : rgba(246, 246, 248, 0.22))
+        : Platform.glass == 2
+            ? (dark ? rgb(31, 31, 33) : rgb(236, 236, 238))
+            : (dark ? rgba(28, 28, 30, 0.58) : rgba(246, 246, 248, 0.6));
+    out property <color> platter: dark ? rgba(255, 255, 255, 0.075) : rgba(255, 255, 255, 0.55);
+    out property <color> rim: dark ? rgba(255, 255, 255, 0.08) : rgba(255, 255, 255, 0.45);
+    out property <color> edge: dark ? rgba(255, 255, 255, 0.05) : rgba(0, 0, 0, 0.07);
+    out property <color> hairline: dark ? rgba(255, 255, 255, 0.08) : rgba(0, 0, 0, 0.08);
+    out property <color> fill: dark ? rgba(255, 255, 255, 0.1) : rgba(0, 0, 0, 0.065);
+    out property <color> fill-active: dark ? rgba(255, 255, 255, 0.2) : rgba(0, 0, 0, 0.15);
+    out property <color> track: dark ? rgba(255, 255, 255, 0.11) : rgba(0, 0, 0, 0.09);
+    out property <color> knob: white;
+    out property <color> text: dark ? rgba(255, 255, 255, 0.93) : rgba(0, 0, 0, 0.87);
+    out property <color> text-2: dark ? rgba(255, 255, 255, 0.6) : rgba(0, 0, 0, 0.55);
+    out property <color> text-3: dark ? rgba(255, 255, 255, 0.42) : rgba(0, 0, 0, 0.4);
+    out property <color> accent: dark ? rgb(10, 132, 255) : rgb(0, 122, 255);
+    out property <color> accent-text: white;
+    out property <color> accent-soft: dark ? rgba(10, 132, 255, 0.28) : rgba(0, 122, 255, 0.18);
+    out property <color> danger: dark ? rgb(255, 105, 97) : rgb(224, 53, 43);
+    out property <color> meter: dark ? rgba(255, 255, 255, 0.5) : rgba(0, 0, 0, 0.38);
+    out property <color> level: dark ? rgba(255, 255, 255, 0.94) : white;
+    out property <color> glyph-on-level: rgba(0, 0, 0, 0.6);
+    out property <color> menu: dark ? rgba(40, 40, 43, 0.97) : rgba(248, 248, 250, 0.98);
+    out property <color> shadow: dark ? rgba(0, 0, 0, 0.18) : rgba(0, 0, 0, 0.05);
+    out property <color> menu-shadow: dark ? rgba(0, 0, 0, 0.45) : rgba(0, 0, 0, 0.18);
+}
+
+/// A glass card with a hairline edge and a soft shadow.
+component Platter inherits Rectangle {
+    background: Theme.platter;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: Theme.edge;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-blur: 10px;
+}
+
+component Glyph inherits Image {
+    in property <length> size: 14px;
+    width: size;
+    height: size;
+    image-fit: contain;
+}
+
+/// A capsule button. It answers to the press, never to the hover.
+/// kind: 0 normal, 1 primary, 2 plain, 3 link, 4 danger, 5 accent.
+component Button {
+    in property <string> text;
+    in property <int> kind;
+    in property <bool> small;
+    callback clicked;
+
+    property <bool> filled: kind == 0 || kind == 1 || kind == 4 || kind == 5;
+    min-width: label.preferred-width + (small ? 20px : 24px);
+    height: small ? 24px : 28px;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { clicked(); }
+
+    Rectangle {
+        border-radius: self.height / 2;
+        background: kind == 1 ? Theme.accent
+            : touch.pressed && kind != 1 ? Theme.fill-active
+            : filled ? Theme.fill : transparent;
+        opacity: kind == 1 && touch.pressed ? 0.9 : 1;
+    }
+
+    label := Text {
+        text: root.text;
+        font-size: small ? 12px : 13px;
+        font-weight: Platform.medium;
+        color: kind == 1 ? Theme.accent-text
+            : kind == 2 ? Theme.text-2
+            : kind == 3 || kind == 5 ? Theme.accent
+            : kind == 4 ? Theme.danger
+            : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+/// The round mute button: filled with the accent while it holds the sound.
+component MuteButton {
+    in property <bool> muted;
+    in property <string> label;
+    callback clicked;
+    width: 32px;
+    height: 32px;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-checkable: true;
+    accessible-checked: muted;
+    accessible-action-default => { clicked(); }
+
+    Rectangle {
+        border-radius: 16px;
+        background: muted ? Theme.accent : touch.pressed ? Theme.fill-active : Theme.fill;
+        opacity: muted && touch.pressed ? 0.9 : 1;
+    }
+
+    Glyph {
+        source: muted ? @image-url("../../assets/icons/speaker-off.svg") : @image-url("../../assets/icons/speaker.svg");
+        colorize: muted ? Theme.accent-text : Theme.text;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+/// The switch, macOS 26/27: a pill knob that crosses on `.bouncy`.
+component Switch {
+    in property <bool> on;
+    width: 38px;
+    height: 22px;
+
+    Rectangle {
+        border-radius: 11px;
+        background: on ? Theme.accent : Theme.fill-active;
+    }
+
+    Rectangle {
+        x: on ? 12px : 2px;
+        y: 2px;
+        width: 24px;
+        height: 18px;
+        border-radius: 9px;
+        background: Theme.knob;
+        drop-shadow-color: rgba(0, 0, 0, 0.2);
+        drop-shadow-offset-y: 1px;
+        drop-shadow-blur: 2.5px;
+        animate x { duration: 500ms; easing: spring(0.3); }
+    }
+}
+
+/// A level meter: a thin capsule filled from the left to `level` (0 to 1).
+component Meter {
+    in property <float> level;
+    in property <bool> dimmed;
+    in property <length> thickness: 3px;
+    height: thickness;
+
+    Rectangle {
+        border-radius: thickness / 2;
+        background: Theme.track;
+        clip: true;
+
+        Rectangle {
+            x: 0;
+            width: parent.width * clamp(level, 0, 1);
+            border-radius: thickness / 2;
+            background: Theme.meter;
+            opacity: dimmed ? 0.3 : 1;
+        }
+    }
+}
+
+component GroupTitle inherits Text {
+    font-size: 12px;
+    font-weight: Platform.semibold;
+    color: Theme.text-2;
+}
+
+component EmptyRow inherits Platter {
+    in property <string> text;
+    min-height: 44px;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+
+        Text {
+            text: root.text;
+            color: Theme.text-2;
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+    }
+}
+
+/// One output that plays: its name and state, the volume capsule with its
+/// meter, the dB value and the mute button; in edit mode, Rename and Remove.
+component OutputView inherits Platter {
+    in property <OutputRow> data;
+    in property <float> level;
+    in property <bool> editing;
+    in property <bool> renaming;
+    in property <string> rename-text;
+    in property <string> rename-suffix;
+    in property <Texts> texts;
+    callback mute();
+    callback fader(value: float, persist: bool);
+    callback step(delta: float);
+    callback rename();
+    callback remove();
+    callback rename-done(text: string, save: bool);
+
+    border-color: scope.has-focus ? Theme.accent : Theme.edge;
+    accessible-role: groupbox;
+    accessible-label: data.name;
+
+    scope := FocusScope {
+        key-pressed(event) => {
+            if (root.editing || event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == "m" || event.text == "M") {
+                root.mute();
+                return accept;
+            }
+            if (event.text == Key.LeftArrow || event.text == Key.DownArrow) {
+                root.step(-0.05);
+                return accept;
+            }
+            if (event.text == Key.RightArrow || event.text == Key.UpArrow) {
+                root.step(0.05);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.step(-1);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.step(1);
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding-top: 12px;
+            padding-bottom: 12px;
+            padding-left: 14px;
+            padding-right: 12px;
+            spacing: 10px;
+
+            HorizontalLayout {
+                spacing: 10px;
+                min-height: 20px;
+
+                if !root.renaming: Text {
+                    horizontal-stretch: 1;
+                    text: root.data.name;
+                    font-weight: Platform.semibold;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+
+                if root.renaming: HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 6px;
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 120px;
+                        border-radius: 7px;
+                        background: Theme.fill;
+                        border-width: 1px;
+                        border-color: Theme.accent;
+
+                        field := TextInput {
+                            x: 7px;
+                            width: parent.width - 14px;
+                            text: root.rename-text;
+                            font-weight: Platform.semibold;
+                            color: Theme.text;
+                            selection-background-color: Theme.accent-soft;
+                            selection-foreground-color: Theme.text;
+                            vertical-alignment: center;
+                            single-line: true;
+                            init => {
+                                self.focus();
+                                self.select-all();
+                            }
+                            accepted => { root.rename-done(self.text, true); }
+                            key-pressed(event) => {
+                                if (event.text == Key.Escape) {
+                                    root.rename-done(self.text, false);
+                                    return accept;
+                                }
+                                reject
+                            }
+                            changed has-focus => {
+                                if (!self.has-focus) {
+                                    root.rename-done(self.text, true);
+                                }
+                            }
+                        }
+                    }
+
+                    if root.rename-suffix != "": Text {
+                        horizontal-stretch: 0;
+                        max-width: 140px;
+                        text: root.rename-suffix;
+                        color: Theme.text-3;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    horizontal-stretch: 0;
+                    text: root.data.state;
+                    font-size: 12px;
+                    color: root.data.error ? Theme.danger : Theme.text-2;
+                    vertical-alignment: center;
+                }
+            }
+
+            if root.editing: HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+
+                if root.data.can-rename: Button {
+                    text: root.texts.rename;
+                    small: true;
+                    clicked => { root.rename(); }
+                }
+                Button {
+                    text: root.texts.remove;
+                    kind: 4;
+                    small: true;
+                    clicked => { root.remove(); }
+                }
+            }
+
+            if !root.editing: HorizontalLayout {
+                spacing: 8px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 5px;
+                    alignment: center;
+
+                    capsule := Rectangle {
+                        height: 28px;
+                        border-radius: 14px;
+                        background: Theme.track;
+                        clip: true;
+                        accessible-role: slider;
+                        accessible-label: root.data.name;
+                        accessible-value: root.data.db;
+                        accessible-value-minimum: 0;
+                        accessible-value-maximum: 1;
+                        accessible-value-step: 0.05;
+                        accessible-action-increment => { root.step(0.05); }
+                        accessible-action-decrement => { root.step(-0.05); }
+
+                        Rectangle {
+                            x: 0;
+                            width: max(28px, parent.width * root.data.fader);
+                            border-radius: 14px;
+                            background: root.data.muted ? Theme.fill-active : Theme.level;
+                        }
+
+                        Glyph {
+                            x: 9px;
+                            y: 7px;
+                            source: @image-url("../../assets/icons/speaker.svg");
+                            colorize: root.data.muted ? Theme.text-3 : Theme.glyph-on-level;
+                        }
+
+                        drag := TouchArea {
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                    root.fader(clamp((self.mouse-x - 14px) / max(1px, self.width - 28px), 0, 1), false);
+                                }
+                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                                    root.fader(clamp((self.mouse-x - 14px) / max(1px, self.width - 28px), 0, 1), true);
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.fader(clamp((self.mouse-x - 14px) / max(1px, self.width - 28px), 0, 1), false);
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+
+                        Meter {
+                            level: root.level;
+                            dimmed: root.data.muted;
+                        }
+                    }
+                }
+
+                Text {
+                    width: 62px;
+                    text: root.data.db;
+                    color: root.data.muted ? Theme.text-3 : Theme.text-2;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+
+                VerticalLayout {
+                    alignment: center;
+
+                    MuteButton {
+                        muted: root.data.muted;
+                        label: root.data.state;
+                        clicked => { root.mute(); }
+                    }
+                }
+            }
+
+            if root.data.detail != "": Text {
+                text: root.data.detail;
+                font-size: 12px;
+                color: Theme.text-2;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+/// A device that is not playing, inside the folded platter.
+component OtherView {
+    in property <OtherRow> data;
+    in property <string> add;
+    in property <int> index;
+    in property <bool> animate-in;
+    callback add-clicked;
+
+    property <bool> shown: !animate-in;
+    min-height: 44px;
+    opacity: shown ? 1 : 0;
+    animate opacity { delay: min(index, 2) * 25ms; duration: 500ms; easing: spring(0); }
+    init => { self.shown = true; }
+
+    Rectangle {
+        x: 14px;
+        y: 0;
+        width: parent.width - 14px;
+        height: 1px;
+        background: Theme.hairline;
+    }
+
+    HorizontalLayout {
+        y: shown ? 0 : -6px;
+        animate y { delay: min(index, 2) * 25ms; duration: 500ms; easing: spring(0); }
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 12px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.data.name;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            Button {
+                text: root.add;
+                kind: 5;
+                small: true;
+                clicked => { root.add-clicked(); }
+            }
+        }
+    }
+}
+
+export component Panel inherits Window {
+    title: "Audio Mirror";
+    icon: @image-url("../../icons/64x64.png");
+    width: 380px;
+    height: 560px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    default-font-family: Platform.font-family;
+    default-font-size: 13px;
+    default-font-weight: Platform.regular;
+
+    in property <Texts> texts;
+    in property <string> run-text;
+    in property <int> run-tone; // 0 on, 1 muted, 2 error
+    in property <bool> update-ready;
+    in property <string> source-label;
+    in property <float> source-level;
+    in property <string> source-db;
+    in property <string> source-error;
+    in property <[OutputRow]> outputs;
+    in property <[float]> levels;
+    in property <string> empty-text;
+    in property <bool> editing;
+    in property <[OtherRow]> others;
+    in property <string> others-label;
+    in property <bool> others-open;
+    in property <bool> others-animate;
+    in property <string> renaming-id;
+    in property <string> rename-text;
+    in property <string> rename-suffix;
+    in property <bool> autostart;
+    in property <[MenuEntry]> menu;
+    in property <bool> menu-open;
+    in property <int> menu-index;
+    /// Height of all the menu's lines, and the top of the checked one.
+    in property <length> menu-content;
+    in property <length> menu-current;
+    /// Lets the header and footer settle in each time the panel opens.
+    in property <bool> settled: true;
+
+    callback hide-panel();
+    callback quit();
+    callback relaunch();
+    callback toggle-edit();
+    callback toggle-others();
+    callback toggle-autostart();
+    callback set-enabled(id: string, enabled: bool);
+    callback toggle-mute(id: string);
+    callback fader(id: string, value: float, persist: bool);
+    callback step(id: string, delta: float);
+    callback start-rename(id: string);
+    callback rename-done(id: string, text: string, save: bool);
+    callback open-menu();
+    callback close-menu();
+    callback menu-move(delta: int);
+    callback menu-hover(index: int);
+    callback menu-choose(index: int);
+
+    /// Puts the keyboard on the panel, so Escape hides it.
+    public function take-focus() {
+        keys.focus();
+    }
+
+    /// Back to the picker once the menu closes.
+    public function focus-picker() {
+        picker-scope.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                if (root.menu-open) {
+                    root.close-menu();
+                } else {
+                    root.hide-panel();
+                }
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            background: Theme.tint;
+            border-radius: Platform.radius;
+            border-width: 1px;
+            border-color: Theme.rim;
+            clip: true;
+
+            VerticalLayout {
+                // Header: title, run state, update.
+                Rectangle {
+                    height: 50px;
+                    opacity: root.settled ? 1 : 0.35;
+                    animate opacity { duration: 500ms; easing: spring(0.15); }
+
+                    HorizontalLayout {
+                        y: root.settled ? 0 : 6px;
+                        animate y { duration: 500ms; easing: spring(0.15); }
+                        padding-top: 16px;
+                        padding-left: 18px;
+                        padding-right: 18px;
+                        padding-bottom: 10px;
+                        spacing: 12px;
+
+                        HorizontalLayout {
+                            horizontal-stretch: 0;
+                            spacing: 7px;
+
+                            Image {
+                                width: 18px;
+                                height: 18px;
+                                y: (parent.height - self.height) / 2;
+                                source: @image-url("../../icons/64x64.png");
+                            }
+
+                            Text {
+                                text: "Audio Mirror";
+                                font-size: 15px;
+                                font-weight: Platform.semibold;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        Text {
+                            horizontal-stretch: 0;
+                            text: root.run-text;
+                            overflow: elide;
+                            color: root.run-tone == 2 ? Theme.danger : root.run-tone == 1 ? Theme.text-2 : Theme.text;
+                            vertical-alignment: center;
+                        }
+
+                        if root.update-ready: VerticalLayout {
+                            alignment: center;
+
+                            Button {
+                                text: root.texts.update;
+                                kind: 1;
+                                small: true;
+                                clicked => { root.relaunch(); }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: flick.content-y < 0 ? Theme.hairline : transparent;
+                    }
+                }
+
+                flick := Flickable {
+                    vertical-stretch: 1;
+                    // The wheel, the trackpad and touch scroll it; a mouse
+                    // drag belongs to the volume capsules.
+                    mouse-drag-pan-enabled: false;
+                    content-height: content.preferred-height;
+
+                    content := VerticalLayout {
+                        width: parent.width;
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        padding-top: 2px;
+                        padding-bottom: 12px;
+                        spacing: 14px;
+
+                        // Source.
+                        VerticalLayout {
+                            spacing: 6px;
+
+                            HorizontalLayout {
+                                padding-left: 6px;
+
+                                GroupTitle {
+                                    text: root.texts.source;
+                                }
+                            }
+
+                            Platter {
+                                VerticalLayout {
+                                    padding-top: 8px;
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-bottom: 12px;
+                                    spacing: 10px;
+
+                                    picker := Rectangle {
+                                        min-height: 32px;
+                                        border-radius: 10px;
+                                        background: root.menu-open ? Theme.fill-active : Theme.fill;
+                                        border-width: picker-scope.has-focus ? 2px : 0;
+                                        border-color: Theme.accent-soft;
+                                        accessible-role: combobox;
+                                        accessible-label: root.texts.source;
+                                        accessible-value: root.source-label;
+                                        accessible-expandable: true;
+                                        accessible-expanded: root.menu-open;
+                                        accessible-action-default => { root.open-menu(); }
+
+                                        picker-scope := FocusScope {
+                                            key-pressed(event) => {
+                                                if (!root.menu-open && (event.text == Key.DownArrow || event.text == Key.UpArrow || event.text == Key.Return || event.text == " ")) {
+                                                    root.open-menu();
+                                                    return accept;
+                                                }
+                                                reject
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-left: 12px;
+                                                padding-right: 10px;
+                                                padding-top: 6px;
+                                                padding-bottom: 6px;
+                                                spacing: 8px;
+
+                                                Text {
+                                                    horizontal-stretch: 1;
+                                                    text: root.source-label;
+                                                    font-weight: Platform.medium;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+
+                                                    Glyph {
+                                                        size: 11px;
+                                                        source: @image-url("../../assets/icons/chevrons.svg");
+                                                        colorize: Theme.text-2;
+                                                    }
+                                                }
+                                            }
+
+                                            TouchArea {
+                                                clicked => {
+                                                    if (root.menu-open) {
+                                                        root.close-menu();
+                                                    } else {
+                                                        root.open-menu();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        spacing: 10px;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+
+                                            Meter {
+                                                level: root.source-level;
+                                                thickness: 4px;
+                                            }
+                                        }
+
+                                        Text {
+                                            width: 62px;
+                                            text: root.source-db;
+                                            color: Theme.text-2;
+                                            horizontal-alignment: right;
+                                        }
+                                    }
+
+                                    if root.source-error != "": HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+
+                                        Text {
+                                            text: root.source-error;
+                                            color: Theme.danger;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Outputs.
+                        VerticalLayout {
+                            spacing: 6px;
+
+                            HorizontalLayout {
+                                min-height: 24px;
+                                padding-left: 6px;
+
+                                GroupTitle {
+                                    horizontal-stretch: 1;
+                                    text: root.texts.outputs;
+                                    vertical-alignment: center;
+                                }
+
+                                if root.outputs.length > 0: VerticalLayout {
+                                    alignment: center;
+
+                                    Button {
+                                        text: root.editing ? root.texts.done : root.texts.edit;
+                                        kind: 3;
+                                        small: true;
+                                        clicked => { root.toggle-edit(); }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 8px;
+
+                                if root.empty-text != "": EmptyRow {
+                                    text: root.empty-text;
+                                }
+
+                                for row[index] in root.outputs: OutputView {
+                                    data: row;
+                                    level: root.levels[index];
+                                    editing: root.editing;
+                                    renaming: root.renaming-id == row.id;
+                                    rename-text: root.rename-text;
+                                    rename-suffix: root.rename-suffix;
+                                    texts: root.texts;
+                                    mute => { root.toggle-mute(row.id); }
+                                    fader(value, persist) => { root.fader(row.id, value, persist); }
+                                    step(delta) => { root.step(row.id, delta); }
+                                    rename => { root.start-rename(row.id); }
+                                    remove => { root.set-enabled(row.id, false); }
+                                    rename-done(text, save) => { root.rename-done(row.id, text, save); }
+                                }
+
+                                if root.others.length > 0: Platter {
+                                    clip: true;
+
+                                    VerticalLayout {
+                                        Rectangle {
+                                            min-height: 44px;
+                                            background: others-touch.pressed ? Theme.fill : transparent;
+                                            accessible-role: button;
+                                            accessible-label: root.others-label;
+                                            accessible-expandable: true;
+                                            accessible-expanded: root.others-open;
+                                            accessible-action-default => { root.toggle-others(); }
+
+                                            HorizontalLayout {
+                                                padding-left: 14px;
+                                                padding-right: 14px;
+                                                padding-top: 10px;
+                                                padding-bottom: 10px;
+                                                spacing: 12px;
+
+                                                Text {
+                                                    horizontal-stretch: 1;
+                                                    text: root.others-label;
+                                                    font-weight: Platform.medium;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                Text {
+                                                    text: root.others-open ? root.texts.hide : root.texts.show;
+                                                    font-weight: Platform.medium;
+                                                    color: Theme.accent;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            others-touch := TouchArea {
+                                                clicked => { root.toggle-others(); }
+                                            }
+                                        }
+
+                                        if root.others-open: VerticalLayout {
+                                            for other[index] in root.others: OtherView {
+                                                data: other;
+                                                index: index;
+                                                add: root.texts.add;
+                                                animate-in: root.others-animate;
+                                                add-clicked => { root.set-enabled(other.id, true); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Footer: Start with system, version, Quit.
+                Rectangle {
+                    height: 50px;
+                    opacity: root.settled ? 1 : 0.35;
+                    animate opacity { delay: 40ms; duration: 500ms; easing: spring(0.15); }
+
+                    Rectangle {
+                        y: 0;
+                        height: 1px;
+                        background: Theme.hairline;
+                    }
+
+                    HorizontalLayout {
+                        y: root.settled ? 0 : 6px;
+                        animate y { delay: 40ms; duration: 500ms; easing: spring(0.15); }
+                        padding-top: 10px;
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-bottom: 12px;
+                        spacing: 12px;
+
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            accessible-role: switch;
+                            accessible-label: root.texts.autostart;
+                            accessible-checkable: true;
+                            accessible-checked: root.autostart;
+                            accessible-action-default => { root.toggle-autostart(); }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    alignment: center;
+
+                                    Switch {
+                                        on: root.autostart;
+                                    }
+                                }
+
+                                Text {
+                                    text: root.texts.autostart;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                clicked => { root.toggle-autostart(); }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        Text {
+                            text: root.texts.version;
+                            color: Theme.text-3;
+                            vertical-alignment: center;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+
+                            Button {
+                                text: root.texts.quit;
+                                kind: 2;
+                                clicked => { root.quit(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The source menu, drawn as macOS pops one up: over the button, the
+        // current item laid on it, kept inside the window.
+        if root.menu-open: TouchArea {
+            clicked => { root.close-menu(); }
+        }
+
+        if root.menu-open: menu-view := Rectangle {
+            property <length> margin: 6px;
+            property <length> shift: 21px;
+            property <length> picker-x: picker.absolute-position.x - root.absolute-position.x;
+            property <length> picker-y: picker.absolute-position.y - root.absolute-position.y;
+            property <bool> shown: false;
+            width: min(picker.width + shift, root.width - 2 * margin);
+            height: min(root.menu-content + 10px, root.height - 2 * margin);
+            x: max(margin, min(picker-x - shift, root.width - self.width - margin));
+            y: max(margin, min(picker-y + (picker.height - 26px) / 2 - 5px - root.menu-current, root.height - self.height - margin));
+            background: Theme.menu;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Theme.edge;
+            drop-shadow-color: Theme.menu-shadow;
+            drop-shadow-offset-y: 10px;
+            drop-shadow-blur: 30px;
+            opacity: shown ? 1 : 0;
+            animate opacity { duration: 180ms; easing: ease-out; }
+            init => {
+                self.shown = true;
+                menu-scope.focus();
+            }
+
+            menu-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.DownArrow) {
+                        root.menu-move(1);
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.menu-move(-1);
+                        return accept;
+                    }
+                    if (event.text == Key.Home) {
+                        root.menu-move(-1000);
+                        return accept;
+                    }
+                    if (event.text == Key.End) {
+                        root.menu-move(1000);
+                        return accept;
+                    }
+                    if (event.text == Key.Return || event.text == " ") {
+                        root.menu-choose(root.menu-index);
+                        return accept;
+                    }
+                    if (event.text == Key.Escape || event.text == Key.Tab) {
+                        root.close-menu();
+                        return accept;
+                    }
+                    reject
+                }
+
+                Flickable {
+                    mouse-drag-pan-enabled: false;
+                    content-height: items.preferred-height;
+
+                    items := VerticalLayout {
+                        width: parent.width;
+                        padding: 5px;
+
+                        for entry[index] in root.menu: Rectangle {
+                            height: entry.header ? 24px : 26px;
+                            border-radius: 8px;
+                            background: !entry.header && index == root.menu-index ? Theme.accent : transparent;
+
+                            if entry.header: Text {
+                                x: 30px;
+                                y: 6px;
+                                text: entry.label;
+                                font-size: 12px;
+                                font-weight: Platform.semibold;
+                                color: Theme.text-2;
+                            }
+
+                            if !entry.header: HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 10px;
+                                spacing: 6px;
+
+                                VerticalLayout {
+                                    width: 14px;
+                                    alignment: center;
+
+                                    if entry.checked: Glyph {
+                                        size: 11px;
+                                        source: @image-url("../../assets/icons/check.svg");
+                                        colorize: index == root.menu-index ? Theme.accent-text : Theme.text;
+                                    }
+                                }
+
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: entry.label;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    color: index == root.menu-index ? Theme.accent-text : Theme.text;
+                                }
+                            }
+
+                            if !entry.header: TouchArea {
+                                moved => { root.menu-hover(index); }
+                                changed has-hover => {
+                                    if (self.has-hover) {
+                                        root.menu-hover(index);
+                                    }
+                                }
+                                clicked => { root.menu-choose(index); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The startup window that checks for an update before anything else
+/// starts (`updater.rs`). Opaque on every system: it shows for a moment,
+/// alone.
+export component Splash inherits Window {
+    title: "Audio Mirror";
+    icon: @image-url("../../icons/64x64.png");
+    width: 300px;
+    height: 110px;
+    no-frame: true;
+    always-on-top: true;
+    background: Theme.dark ? rgb(31, 31, 33) : rgb(236, 236, 238);
+    default-font-family: Platform.font-family;
+    default-font-size: 13px;
+    default-font-weight: Platform.regular;
+
+    in property <string> text;
+    /// -1 while the size of the download is unknown.
+    in property <int> percent: -1;
+
+    VerticalLayout {
+        padding-left: 22px;
+        padding-right: 22px;
+        spacing: 6px;
+        alignment: center;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            Image {
+                width: 20px;
+                height: 20px;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../icons/64x64.png");
+            }
+
+            Text {
+                text: "Audio Mirror";
+                font-size: 17px;
+                font-weight: Platform.semibold;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: Theme.text-2;
+        }
+
+        Rectangle {
+            height: 12px;
+
+            Rectangle {
+                y: 8px;
+                height: 4px;
+                border-radius: 2px;
+                background: root.percent >= 0 ? Theme.track : transparent;
+                clip: true;
+
+                Rectangle {
+                    x: 0;
+                    width: parent.width * max(0, root.percent) / 100;
+                    border-radius: 2px;
+                    background: Theme.accent;
+                }
+            }
+        }
+    }
+}

@@ -162,9 +162,9 @@ fn process_audio(st: &mut ProcessState, audio: &SourceAudio) -> Option<usize> {
                 *slot = plane.as_ptr();
             }
             let n = rs.resample(&ptrs[..audio.planes.len()], audio.frames)? as usize;
-            for ch in 0..OBS_CHANNELS {
+            for (ch, storage) in st.storage.iter_mut().enumerate() {
                 let samples = as_f32(rs.plane(ch));
-                copy_plane(&mut st.storage[ch], &samples[..n]);
+                copy_plane(storage, &samples[..n]);
             }
             n
         }
